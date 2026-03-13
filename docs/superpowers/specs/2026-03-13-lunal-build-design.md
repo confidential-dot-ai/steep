@@ -154,7 +154,7 @@ igvm-tools build \
     -o <output.igvm>
 ```
 
-The `--smp` flag is critical: the SNP launch digest includes one VMSA per vCPU, so the digest changes with vCPU count. The `--platform snp` is explicit (though it is the igvm-tools default).
+The `--smp` flag is critical: the SNP launch digest includes one VMSA per vCPU, so the digest changes with vCPU count. The `--platform snp` is explicit (though it is the igvm-tools default). The `--boot-mode` flag is omitted, relying on the igvm-tools default of `real16` which is appropriate for OVMF SEV-SNP guests.
 
 ### Output Artifacts
 
