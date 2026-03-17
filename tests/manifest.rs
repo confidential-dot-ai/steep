@@ -73,10 +73,12 @@ fn test_sha256_file_hash() {
 #[test]
 fn test_parse_igvm_manifest() {
     let igvm_json = r#"{
-        "snp_launch_digest": "aabbccdd",
-        "algorithm": "sha384",
-        "page_count": 5598,
-        "vmsa_count": 4
+        "measurement": {
+            "snp_launch_digest": "aabbccdd",
+            "algorithm": "sha384",
+            "page_count": 5598,
+            "vmsa_count": 4
+        }
     }"#;
     let measurement = steep::manifest::parse_igvm_manifest(igvm_json).unwrap();
     assert_eq!(measurement.snp_launch_digest, "aabbccdd");
