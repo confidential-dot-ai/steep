@@ -69,6 +69,18 @@ Remove the four tests that reference `MkosiConfig::base()` or `MkosiProfile::Bas
 
 All remaining tests (container config, extra-file writing, etc.) are unchanged.
 
+### `tests/nftables.rs`
+
+Remove the five tests that call `nftables::base_rules()`:
+
+- `test_base_rules_drops_all_input`
+- `test_base_rules_allows_loopback`
+- `test_base_rules_allows_established`
+- `test_base_rules_output_policy_is_drop`
+- `test_base_rules_starts_with_shebang`
+
+The three remaining tests (`test_service_rules_opens_port`, `test_service_rules_output_policy_is_accept`, `test_service_rules_starts_with_shebang`) are unchanged.
+
 ## Out of Scope
 
 - `container`, `cloud_init`, and `repart` mkosi config generation — these remain Rust-generated for now
