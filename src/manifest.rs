@@ -70,8 +70,13 @@ pub fn write_manifest(manifest: &BuildManifest, path: &Path) -> anyhow::Result<(
 }
 
 /// Parse the igvm-tools manifest JSON to extract measurement data.
+/// The igvm-tools manifest nests the measurement under a "measurement" key.
 pub fn parse_igvm_manifest(json: &str) -> anyhow::Result<Measurement> {
-    let measurement: Measurement = serde_json::from_str(json)?;
+    let value: serde_json::Value = serde_json::from_str(json)?;
+    let measurement_value = value
+        .get("measurement")
+        .ok_or_else(|| anyhow::anyhow!("igvm manifest missing 'measurement' key"))?;
+    let measurement: Measurement = serde_json::from_value(measurement_value.clone())?;
     Ok(measurement)
 }
 
