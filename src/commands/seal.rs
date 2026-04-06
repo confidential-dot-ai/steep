@@ -32,6 +32,9 @@ pub fn run(args: &SealArgs) -> anyhow::Result<()> {
         Some(it.clone())
     };
 
+    // Validate memory format before it reaches QEMU arg interpolation
+    crate::qemu::validate_memory(&args.memory)?;
+
     // Validate cloud-init user-data if provided
     if let Some(ref ci) = args.cloud_init {
         if !ci.exists() {
@@ -44,12 +47,30 @@ pub fn run(args: &SealArgs) -> anyhow::Result<()> {
     let mkosi_bin = tools::resolve_mkosi()?;
     tracing::info!("mkosi resolved to {mkosi_bin}");
 
-    // Prepare output directory
+    // Prepare output directory — check for symlinks before deletion to prevent
+    // remove_dir_all from following a symlink and deleting an unrelated directory.
     if fs_err::exists(&args.output)? {
+        let meta = fs_err::symlink_metadata(&args.output)?;
+        if meta.is_symlink() {
+            anyhow::bail!(
+                "output path is a symlink (refusing to delete): {}",
+                args.output.display()
+            );
+        }
         fs_err::remove_dir_all(&args.output)?;
     }
     fs_err::create_dir_all(&args.output)?;
     let output = args.output.canonicalize()?;
+
+    // Inject debug autologin if --debug (enables passwordless root on serial console)
+    let autologin_dir = PathBuf::from("mkosi/base/mkosi.extra/etc/systemd/system/serial-getty@ttyS0.service.d");
+    let _debug_guard = if args.debug {
+        println!("WARNING: --debug enables passwordless root on serial console. Do not use in production.");
+        inject_debug_autologin(&autologin_dir)?;
+        Some(DebugCleanup { dir: autologin_dir })
+    } else {
+        None
+    };
 
     // Inject cloud-init user-data into mkosi.extra seed directory (measured in verity root)
     let seed_dir = PathBuf::from("mkosi/base/mkosi.extra/var/lib/cloud/seed/nocloud");
@@ -121,9 +142,15 @@ pub fn run(args: &SealArgs) -> anyhow::Result<()> {
         anyhow::bail!("image.roothash not found — check mkosi.conf has SplitArtifacts=roothash");
     }
     tools::sudo_chmod_readable(&roothash_path)?;
-    let roothash = fs_err::read_to_string(&roothash_path)?.trim().to_string();
-    if roothash.is_empty() || !roothash.chars().all(|c| c.is_ascii_hexdigit()) {
-        anyhow::bail!("invalid roothash from mkosi: {roothash:?}");
+    let roothash = fs_err::read_to_string(&roothash_path)?.trim().to_lowercase();
+    let valid_lengths = [64, 96, 128]; // SHA-256, SHA-384, SHA-512
+    if !valid_lengths.contains(&roothash.len())
+        || !roothash.chars().all(|c| c.is_ascii_hexdigit())
+    {
+        anyhow::bail!(
+            "invalid roothash from mkosi: {roothash:?} (expected 64/96/128 hex chars, got {})",
+            roothash.len()
+        );
     }
     fs_err::write(output.join("roothash"), &roothash)?;
     println!("Root hash: {roothash}");
@@ -233,9 +260,34 @@ pub fn run(args: &SealArgs) -> anyhow::Result<()> {
     if args.cloud_init.is_some() {
         println!("  Cloud-init: measured in verity root{}", if args.bake { " (baked)" } else { " (boot-time)" });
     }
+    if args.debug {
+        println!("  Debug:      autologin enabled (NOT for production)");
+    }
     println!("===============================");
 
     Ok(())
+}
+
+/// Inject a systemd drop-in that enables passwordless root autologin on ttyS0.
+/// Only used with --debug; changes the image measurement.
+fn inject_debug_autologin(dir: &Path) -> anyhow::Result<()> {
+    fs_err::create_dir_all(dir)?;
+    fs_err::write(
+        dir.join("autologin.conf"),
+        "[Service]\nExecStart=\nExecStart=-/sbin/agetty -o '-p -f -- \\\\u' --noclear --autologin root --keep-baud 115200,57600,38400,9600 %I $TERM\n",
+    )?;
+    Ok(())
+}
+
+/// RAII guard to clean up debug autologin drop-in after mkosi build.
+struct DebugCleanup {
+    dir: PathBuf,
+}
+
+impl Drop for DebugCleanup {
+    fn drop(&mut self) {
+        let _ = fs_err::remove_dir_all(&self.dir);
+    }
 }
 
 /// Inject cloud-init user-data into the mkosi.extra seed directory.
@@ -276,7 +328,7 @@ impl Drop for CloudInitCleanup {
         // Walk up and remove empty parent dirs (nocloud/seed/cloud/lib/var)
         let mut dir = self.seed_dir.clone();
         while let Some(parent) = dir.parent() {
-            if parent.ends_with("mkosi.extra") {
+            if dir.ends_with("mkosi.extra") {
                 break;
             }
             if fs_err::remove_dir(parent).is_err() {

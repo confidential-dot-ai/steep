@@ -1,8 +1,11 @@
 use std::path::PathBuf;
 
-use crate::manifest;
+use crate::manifest::{self, BuildManifest};
 use crate::qemu::{self, QemuArgs, QemuTier};
 use crate::RunArgs;
+
+const ALLOWED_DISK_FORMATS: &[&str] = &["raw", "qcow2"];
+const ALLOWED_PLATFORMS: &[&str] = &["snp", "generic"];
 
 pub fn run(args: &RunArgs) -> anyhow::Result<()> {
     tracing::info!(dir = %args.dir.display(), "launching VM");
@@ -20,6 +23,11 @@ pub fn run(args: &RunArgs) -> anyhow::Result<()> {
         );
     }
     let manifest = manifest::read_manifest(&manifest_path)?;
+
+    // Validate manifest-derived values before they reach QEMU argument interpolation.
+    // These fields are comma-interpolated into QEMU -object/-drive args where commas
+    // are delimiters, so injection is possible without validation.
+    validate_manifest_fields(&manifest)?;
 
     // Detect QEMU tier
     let tier = qemu::detect_tier_for(&args.qemu_bin)?;
@@ -131,5 +139,32 @@ pub fn run(args: &RunArgs) -> anyhow::Result<()> {
     }
 
     qemu::launch(&qemu_args)?;
+    Ok(())
+}
+
+/// Validate manifest fields that flow into QEMU arguments or path construction.
+/// Prevents injection via comma-delimited QEMU args and path traversal via format field.
+fn validate_manifest_fields(manifest: &BuildManifest) -> anyhow::Result<()> {
+    if !ALLOWED_DISK_FORMATS.contains(&manifest.build.format.as_str()) {
+        anyhow::bail!(
+            "unsupported disk format in manifest: {:?} (allowed: {:?})",
+            manifest.build.format,
+            ALLOWED_DISK_FORMATS
+        );
+    }
+    if !ALLOWED_PLATFORMS.contains(&manifest.build.platform.as_str()) {
+        anyhow::bail!(
+            "unsupported platform in manifest: {:?} (allowed: {:?})",
+            manifest.build.platform,
+            ALLOWED_PLATFORMS
+        );
+    }
+    qemu::validate_memory(&manifest.build.memory)?;
+    if manifest.build.smp == 0 || manifest.build.smp > 1024 {
+        anyhow::bail!(
+            "invalid smp count in manifest: {} (must be 1-1024)",
+            manifest.build.smp
+        );
+    }
     Ok(())
 }
