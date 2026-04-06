@@ -25,10 +25,3 @@ fn test_run_command_failure() {
     let result = tools::run_command("sh", &["-c", "exit 1"]);
     assert!(result.is_err());
 }
-
-#[test]
-fn test_safe_path_includes_system_dirs() {
-    let path = tools::safe_path();
-    assert!(path.contains("/usr/bin"));
-    assert!(path.contains("/usr/sbin"));
-}

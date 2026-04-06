@@ -2,6 +2,29 @@ use std::{os::unix::process::CommandExt as _, path::PathBuf, process::Command};
 
 use crate::tools;
 
+/// Validate a QEMU memory string (e.g. "4G", "512M").
+/// Rejects values containing commas or other characters that could inject
+/// additional properties into QEMU's -object comma-delimited argument format.
+pub fn validate_memory(s: &str) -> anyhow::Result<()> {
+    // Must be digits optionally followed by a single size suffix
+    let valid = !s.is_empty()
+        && s.bytes().last().map_or(false, |last| {
+            let suffix = b"KMGTkmgt";
+            if suffix.contains(&last) {
+                s[..s.len() - 1].bytes().all(|b| b.is_ascii_digit())
+            } else {
+                s.bytes().all(|b| b.is_ascii_digit())
+            }
+        });
+    if !valid {
+        anyhow::bail!(
+            "invalid memory format: {:?} (expected digits with optional K/M/G/T suffix)",
+            s
+        );
+    }
+    Ok(())
+}
+
 /// The detected QEMU capability tier.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum QemuTier {
@@ -47,6 +70,18 @@ pub fn detect_tier_for(qemu_bin: &str) -> anyhow::Result<QemuTier> {
     Ok(select_tier(&object_help, kvm_available))
 }
 
+/// Reject paths containing commas — QEMU uses comma-delimited key=value in
+/// -object/-drive args, so a comma in a path injects additional properties.
+fn reject_comma_in_path(label: &str, path: &std::path::Path) -> anyhow::Result<()> {
+    if path.to_string_lossy().contains(',') {
+        anyhow::bail!(
+            "{label} path contains a comma, which would be misinterpreted by QEMU: {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 /// Arguments for launching a VM with QEMU.
 pub struct QemuArgs {
     pub tier: QemuTier,
@@ -64,6 +99,12 @@ pub struct QemuArgs {
 impl QemuArgs {
     /// Build the QEMU command-line arguments.
     pub fn to_args(&self) -> anyhow::Result<Vec<String>> {
+        // Validate all paths that will be interpolated into comma-delimited QEMU args
+        reject_comma_in_path("disk", &self.disk)?;
+        if let Some(ref p) = self.igvm { reject_comma_in_path("igvm", p)?; }
+        if let Some(ref p) = self.uki { reject_comma_in_path("uki", p)?; }
+        if let Some(ref p) = self.firmware { reject_comma_in_path("firmware", p)?; }
+
         let mut args = match self.tier {
             QemuTier::SevSnp => {
                 let igvm = self.igvm.as_ref()
@@ -112,6 +153,11 @@ impl QemuArgs {
             }
         };
 
+        // Validate disk_format before interpolation into comma-delimited QEMU arg
+        let allowed_formats = ["raw", "qcow2"];
+        if !allowed_formats.contains(&self.disk_format.as_str()) {
+            anyhow::bail!("unsupported disk format: {:?}", self.disk_format);
+        }
         args.push("-drive".to_string());
         args.push(format!(
             "file={},format={},if=virtio",

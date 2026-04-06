@@ -66,6 +66,12 @@ pub struct SealArgs {
     #[arg(long, requires = "cloud_init")]
     pub bake: bool,
 
+    /// Enable debug console (passwordless root autologin on serial).
+    /// WARNING: In the SNP threat model, the host controls the serial port.
+    /// This changes the image measurement.
+    #[arg(long)]
+    pub debug: bool,
+
     /// Skip IGVM generation (produce only disk + UKI, no SNP measurement)
     #[arg(long)]
     pub skip_igvm: bool,
