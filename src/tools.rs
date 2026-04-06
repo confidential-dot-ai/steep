@@ -51,11 +51,11 @@ pub fn run_command(tool: &str, args: &[&str]) -> Result<String, ToolError> {
         return Err(ToolError::Failed {
             tool: tool.to_string(),
             code,
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         });
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// Run a command with inherited stdio (streams output to the terminal).
@@ -103,29 +103,24 @@ pub fn run_command_streaming_in(
 
 /// Copy a file with sudo and set permissions to 644.
 /// mkosi outputs are root-owned; this copies them to the output directory readably.
+/// Uses OsStr args to avoid lossy UTF-8 conversion corrupting paths.
 pub fn sudo_copy(src: &Path, dst: &Path) -> Result<(), ToolError> {
-    run_command("sudo", &["cp", &src.to_string_lossy(), &dst.to_string_lossy()])?;
-    run_command("sudo", &["chmod", "644", &dst.to_string_lossy()])?;
+    run_command_streaming("sudo", &[OsStr::new("cp"), src.as_os_str(), dst.as_os_str()])?;
+    run_command_streaming(
+        "sudo",
+        &[OsStr::new("chmod"), OsStr::new("644"), dst.as_os_str()],
+    )?;
     Ok(())
 }
 
 /// Make a root-owned file readable (chmod 644 via sudo).
+/// Uses OsStr args to avoid lossy UTF-8 conversion corrupting paths.
 pub fn sudo_chmod_readable(path: &Path) -> Result<(), ToolError> {
-    run_command("sudo", &["chmod", "644", &path.to_string_lossy()])?;
+    run_command_streaming(
+        "sudo",
+        &[OsStr::new("chmod"), OsStr::new("644"), path.as_os_str()],
+    )?;
     Ok(())
-}
-
-/// Safe PATH for sudo commands — only system directories, no user-controlled paths.
-/// Includes ~/.local/bin only if mkosi was installed there (pip install --user).
-pub fn safe_path() -> String {
-    let base = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
-    if let Ok(home) = std::env::var("HOME") {
-        let local_bin = format!("{home}/.local/bin");
-        if Path::new(&local_bin).join("mkosi").exists() {
-            return format!("{local_bin}:{base}");
-        }
-    }
-    base.to_string()
 }
 
 /// Resolve the canonical path of mkosi, following symlinks.
