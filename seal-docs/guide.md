@@ -81,10 +81,11 @@ Reads smp, memory, format, and platform from `manifest.json`. Detects QEMU capab
 
 ```bash
 qemu-system-x86_64 \
-  -machine q35 -enable-kvm \
-  -drive "if=pflash,format=raw,readonly=on,file=/path/to/OVMF.fd" \
-  -kernel output/my-image/uki.efi \
-  -drive "file=output/my-image/disk.raw,format=raw,if=virtio" \
+  -machine q35 \
+  -enable-kvm \
+  -drive "if=pflash,format=raw,readonly=on,file=OVMF.fd" \
+  -kernel uki.efi \
+  -drive "file=disk.raw,format=raw,if=virtio" \
   -smp 1 -m 4G -nographic \
   -netdev "user,id=net0,hostfwd=tcp::8080-:8080" \
   -device virtio-net-pci,netdev=net0
