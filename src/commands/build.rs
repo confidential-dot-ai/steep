@@ -48,6 +48,9 @@ pub fn run(args: &BuildArgs) -> anyhow::Result<()> {
         }
     }
 
+    // Redirect TMPDIR onto disk so mkosi's staging doesn't OOM tmpfs /tmp.
+    let _tmpdir_guard = tools::prepare_safe_tmpdir()?;
+
     // Prepare the per-build mkosi.local/ overlay. Any debris from a crashed
     // prior build is wiped so we start from a clean slate. The cleanup guard
     // is installed *before* anything writes into the overlay so that early
@@ -123,9 +126,11 @@ pub fn run(args: &BuildArgs) -> anyhow::Result<()> {
     if !initrd_dir.exists() {
         anyhow::bail!("mkosi initrd config not found: {}", initrd_dir.display());
     }
+    // preserve-env carries the TMPDIR redirect through sudo's env_reset.
     tools::run_command_streaming(
         "sudo",
         &[
+            "--preserve-env=TMPDIR,XDG_RUNTIME_DIR",
             mkosi_bin.as_str(),
             "--directory",
             &*initrd_dir.to_string_lossy(),
@@ -149,6 +154,7 @@ pub fn run(args: &BuildArgs) -> anyhow::Result<()> {
     }
 
     let mut mkosi_args: Vec<String> = vec![
+        "--preserve-env=TMPDIR,XDG_RUNTIME_DIR".to_string(),
         mkosi_bin.clone(),
         "--directory".to_string(),
         mkosi_dir.to_string_lossy().into_owned(),
