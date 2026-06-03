@@ -1,4 +1,5 @@
 use std::ffi::OsStr;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -173,6 +174,76 @@ pub fn force_remove_dir_all(path: &Path) -> std::io::Result<()> {
         }
         Err(e) => Err(e),
     }
+}
+
+/// Disk-backed scratch dir; TMPDIR + XDG_RUNTIME_DIR point at it until drop.
+/// STEEP_TMPDIR overrides path; STEEP_KEEP_TMPDIR=1 retains the dir.
+pub struct SafeTmpdir {
+    path: PathBuf,
+    prev_tmpdir: Option<std::ffi::OsString>,
+    prev_xdg: Option<std::ffi::OsString>,
+}
+
+impl SafeTmpdir {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for SafeTmpdir {
+    fn drop(&mut self) {
+        if std::env::var_os("STEEP_KEEP_TMPDIR").as_deref() == Some(std::ffi::OsStr::new("1")) {
+            eprintln!("steep: scratch retained at {}", self.path.display());
+        } else if let Err(e) = force_remove_dir_all(&self.path) {
+            eprintln!("steep: warning: could not clean scratch {}: {e}", self.path.display());
+        }
+        match self.prev_tmpdir.take() {
+            Some(v) => std::env::set_var("TMPDIR", v),
+            None => std::env::remove_var("TMPDIR"),
+        }
+        match self.prev_xdg.take() {
+            Some(v) => std::env::set_var("XDG_RUNTIME_DIR", v),
+            None => std::env::remove_var("XDG_RUNTIME_DIR"),
+        }
+    }
+}
+
+/// Create a disk-backed scratch dir and point TMPDIR + XDG_RUNTIME_DIR at it.
+/// Mkosi staging on tmpfs `/tmp` OOMs the host on shared workloads; this avoids that.
+pub fn prepare_safe_tmpdir() -> Result<SafeTmpdir, ToolError> {
+    let path = match std::env::var_os("STEEP_TMPDIR") {
+        Some(p) => PathBuf::from(p),
+        None => PathBuf::from(format!("/var/tmp/steep-build-{}", std::process::id())),
+    };
+    let tmp = path.join("tmp");
+    let run = path.join("run");
+    fs_err::create_dir_all(&tmp).map_err(|e| ToolError::Io {
+        tool: "tmpdir".to_string(),
+        source: e,
+    })?;
+    fs_err::create_dir_all(&run).map_err(|e| ToolError::Io {
+        tool: "tmpdir".to_string(),
+        source: e,
+    })?;
+    // systemd-nspawn requires XDG_RUNTIME_DIR be 0700.
+    let _ = std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o700));
+
+    let prev_tmpdir = std::env::var_os("TMPDIR");
+    let prev_xdg = std::env::var_os("XDG_RUNTIME_DIR");
+    std::env::set_var("TMPDIR", &tmp);
+    std::env::set_var("XDG_RUNTIME_DIR", &run);
+
+    tracing::info!(scratch = %path.display(), "redirected TMPDIR + XDG_RUNTIME_DIR to disk");
+    eprintln!(
+        "steep: build scratch on disk at {} (override with STEEP_TMPDIR, keep with STEEP_KEEP_TMPDIR=1)",
+        path.display()
+    );
+
+    Ok(SafeTmpdir {
+        path,
+        prev_tmpdir,
+        prev_xdg,
+    })
 }
 
 /// Resolve the canonical path of mkosi, following symlinks.

@@ -12,9 +12,16 @@ pub fn run(
     out_vmlinuz: &Path,
     log_path: &Path,
 ) -> Result<()> {
-    let parallelism = std::thread::available_parallelism()
+    // Cap make -j: cc peaks ~1–2 GiB per process; 8 keeps the worst case ~16 GiB.
+    // STEEP_KERNEL_JOBS overrides for hosts with headroom.
+    let detected = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
+    let parallelism = std::env::var("STEEP_KERNEL_JOBS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|n| *n >= 1)
+        .unwrap_or_else(|| detected.min(8));
 
     // Truncate the build log up front so it always reflects this run.
     fs_err::write(log_path, b"")?;
