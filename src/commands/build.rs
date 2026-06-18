@@ -136,9 +136,22 @@ pub fn run(args: &BuildArgs) -> anyhow::Result<()> {
             "--force",
         ],
     )?;
-    let initrd_path = initrd_dir
+    let mkosi_initrd = initrd_dir
         .join("mkosi.output/image.cpio.gz")
         .canonicalize()?;
+
+    // Assemble a trusted-DSDT early-cpio and prepend it to mkosi's initrd.
+    //
+    // The kernel feature CONFIG_ACPI_TABLE_UPGRADE scans the initrd stream
+    // from the start for `kernel/firmware/acpi/*.aml` and uses each match to
+    // replace the firmware-supplied ACPI table of the same signature. We
+    // ship our trusted DSDT this way so the kernel runs OUR AML, not the
+    // VMM's — closing the "BadAML" attack surface. The override is invisible
+    // to mkosi: we just feed it a concatenated stream as --initrd.
+    //
+    // Order matters: kernel parses the initrd from the start, so the early
+    // (uncompressed) cpio MUST precede the gzipped main cpio.
+    let initrd_path = assemble_initrd_with_trusted_dsdt(&output, &mkosi_initrd)?;
     println!(
         "Initrd: {} ({})",
         initrd_path.display(),
@@ -492,6 +505,148 @@ fn chrono_now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
+/// Compile the trusted DSDT (ASL → AML), build a one-file early cpio
+/// containing `kernel/firmware/acpi/dsdt.aml`, and prepend it to the
+/// mkosi-built initrd. Returns the path to the combined initrd, which is
+/// what the rest of the pipeline (UKI assembly, RTMR[2] measurement,
+/// IGVM launch digest) sees as "the initrd."
+///
+/// The kernel parses the initrd stream in order from offset 0. An
+/// uncompressed newc cpio at the start is recognized and consumed, then
+/// the gzipped cpio that follows is decompressed and unpacked normally —
+/// any file path appearing in BOTH is overwritten by the later (main)
+/// cpio. That's fine for us: we only ship one path (`dsdt.aml`) and the
+/// main initrd never contains it, so there's no conflict.
+fn assemble_initrd_with_trusted_dsdt(
+    output: &Path,
+    mkosi_initrd: &Path,
+) -> anyhow::Result<PathBuf> {
+    let dsdt_asl = PathBuf::from("mkosi/base/acpi-tables/dsdt.asl");
+    if !dsdt_asl.exists() {
+        anyhow::bail!("trusted DSDT not found at {}", dsdt_asl.display());
+    }
+
+    // iasl writes both the .aml and a disassembly listing next to its -p
+    // argument. Put it in the per-build output directory so a parallel
+    // build can't race on a shared temp path.
+    let dsdt_aml = output.join("dsdt.aml");
+    if dsdt_aml.exists() {
+        fs_err::remove_file(&dsdt_aml)?;
+    }
+    let dsdt_aml_str = dsdt_aml.to_string_lossy().into_owned();
+    let dsdt_asl_str = dsdt_asl.to_string_lossy().into_owned();
+    tools::run_command_streaming("iasl", &["-p", &dsdt_aml_str, &dsdt_asl_str])
+        .map_err(|e| anyhow::anyhow!("iasl failed compiling {}: {}", dsdt_asl.display(), e))?;
+    if !dsdt_aml.exists() {
+        anyhow::bail!("iasl reported success but {} is missing", dsdt_aml.display());
+    }
+
+    // Stage the AML in the path layout CONFIG_ACPI_TABLE_UPGRADE expects:
+    //   kernel/firmware/acpi/<table>.aml
+    // built inside a fresh dir so the cpio archive contains only this entry
+    // (no stray dotfiles or sibling artifacts).
+    let staging = output.join(".early-acpi");
+    if staging.exists() {
+        fs_err::remove_dir_all(&staging)?;
+    }
+    let staged_dir = staging.join("kernel/firmware/acpi");
+    fs_err::create_dir_all(&staged_dir)?;
+    fs_err::copy(&dsdt_aml, staged_dir.join("dsdt.aml"))?;
+
+    // Build the early cpio. GNU cpio reads file paths on stdin; we list
+    // entries relative to the staging dir and run cpio with cwd at that
+    // dir so the archive holds relative paths. Use newc format (the only
+    // format the kernel's CONFIG_INITRAMFS_COMPRESSION supports).
+    let early_cpio = output.join("early.cpio");
+    build_early_cpio(&staging, &early_cpio)?;
+
+    // Concatenate early.cpio || mkosi_initrd. The combined file is what
+    // mkosi receives via --initrd and what RTMR[2] / launch digests
+    // ultimately measure as `.initrd`.
+    let combined = output.join("combined-initrd.img");
+    concat_files(&[&early_cpio, mkosi_initrd], &combined)?;
+
+    // Staging tree and intermediate cpio are throwaway once concatenation
+    // succeeds; leaving them around would just clutter the output dir.
+    fs_err::remove_dir_all(&staging)?;
+    fs_err::remove_file(&early_cpio)?;
+
+    combined.canonicalize().map_err(|e| {
+        anyhow::anyhow!(
+            "canonicalizing combined initrd {}: {}",
+            combined.display(),
+            e
+        )
+    })
+}
+
+/// Build a newc-format cpio archive from every regular file and
+/// directory under `root` (descending), writing the archive to `out`.
+///
+/// Uses GNU cpio in -o (copy-out) mode reading null-terminated paths on
+/// stdin. Cwd is set to `root` so paths inside the archive are relative,
+/// matching what the kernel's initramfs unpacker expects.
+fn build_early_cpio(root: &Path, out: &Path) -> anyhow::Result<()> {
+    use std::process::{Command, Stdio};
+    let root_abs = root.canonicalize()?;
+    let out_abs = if out.is_absolute() {
+        out.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(out)
+    };
+
+    // `find . -mindepth 1 -print0` enumerates everything inside root.
+    // Piping into `cpio -o -H newc --null --quiet` packs them.
+    let mut find = Command::new("find")
+        .arg(".")
+        .arg("-mindepth")
+        .arg("1")
+        .arg("-print0")
+        .current_dir(&root_abs)
+        .stdout(Stdio::piped())
+        .spawn()?;
+    let find_stdout = find
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("could not capture find stdout"))?;
+
+    let cpio_out = std::fs::File::create(&out_abs)?;
+    let cpio = Command::new("cpio")
+        .args(["-o", "-H", "newc", "--null", "--quiet"])
+        .current_dir(&root_abs)
+        .stdin(Stdio::from(find_stdout))
+        .stdout(Stdio::from(cpio_out))
+        .stderr(Stdio::inherit())
+        .spawn()?;
+    let cpio_output = cpio.wait_with_output()?;
+    let find_status = find.wait()?;
+    if !find_status.success() {
+        anyhow::bail!(
+            "find failed enumerating {} (exit {:?})",
+            root_abs.display(),
+            find_status.code()
+        );
+    }
+    if !cpio_output.status.success() {
+        anyhow::bail!(
+            "cpio failed building {} (exit {:?})",
+            out_abs.display(),
+            cpio_output.status.code()
+        );
+    }
+    Ok(())
+}
+
+/// Concatenate the byte streams of `parts` (in order) into `out`.
+fn concat_files(parts: &[&Path], out: &Path) -> anyhow::Result<()> {
+    let mut sink = fs_err::File::create(out)?;
+    for p in parts {
+        let mut src = fs_err::File::open(p)?;
+        std::io::copy(&mut src, &mut sink)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -619,5 +774,47 @@ mod tests {
         let dir = parent.path().join("never-existed");
         drop(MkosiLocalCleanup { dir });
         // No panic == pass.
+    }
+
+    #[test]
+    fn build_early_cpio_packs_files_from_root() {
+        // Sanity: build_early_cpio reads a directory and produces a
+        // non-empty newc cpio whose magic ("070701") appears at the start
+        // of the first entry header. This is what
+        // CONFIG_ACPI_TABLE_UPGRADE scans for at offset 0 of the initrd.
+        let src = TempDir::new().unwrap();
+        let nested = src.path().join("kernel/firmware/acpi");
+        fs_err::create_dir_all(&nested).unwrap();
+        fs_err::write(nested.join("dsdt.aml"), b"DSDT-fake-aml").unwrap();
+
+        let out_dir = TempDir::new().unwrap();
+        let cpio_path = out_dir.path().join("early.cpio");
+        build_early_cpio(src.path(), &cpio_path).unwrap();
+
+        let bytes = fs_err::read(&cpio_path).unwrap();
+        assert!(!bytes.is_empty(), "cpio archive should not be empty");
+        assert!(
+            bytes.starts_with(b"070701"),
+            "cpio archive should start with newc magic '070701', got {:?}",
+            &bytes[..6.min(bytes.len())]
+        );
+        // The aml file's bytes should appear verbatim somewhere in the
+        // archive (newc stores file data inline after each header).
+        assert!(
+            bytes.windows(b"DSDT-fake-aml".len()).any(|w| w == b"DSDT-fake-aml"),
+            "cpio archive should embed the staged file data"
+        );
+    }
+
+    #[test]
+    fn concat_files_preserves_order_and_bytes() {
+        let dir = TempDir::new().unwrap();
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+        let out = dir.path().join("out");
+        fs_err::write(&a, b"AAA").unwrap();
+        fs_err::write(&b, b"BBB").unwrap();
+        concat_files(&[a.as_path(), b.as_path()], &out).unwrap();
+        assert_eq!(fs_err::read(&out).unwrap(), b"AAABBB");
     }
 }
