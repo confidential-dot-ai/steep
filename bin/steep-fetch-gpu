@@ -32,8 +32,8 @@ readonly RUN_INSTALLER="https://us.download.nvidia.com/tesla/${NV_VERSION}/NVIDI
 
 # sha256 pins. FILL THESE at Stage 2 (compute once, commit). The script REFUSES
 # to run against the sentinel so an unverified download can never slip through.
-readonly OGKM_SHA256="FILL_AT_STAGE_2_open_gpu_kernel_modules_595.71.05_tar_gz"
-readonly RUN_SHA256="FILL_AT_STAGE_2_NVIDIA_Linux_x86_64_595.71.05_run"
+readonly OGKM_SHA256="cb26114c97ef2568377a7eb55ef97e559c42f1b686238b4d09d7a6fabd0cad50"
+readonly RUN_SHA256="36203b8960b7e49c8a42f6ba1f5863cde34a05e93d2b24b798af06dd846f6b82"
 
 # --- Paths ---
 readonly KERNEL_OUT="output/kernel"
@@ -61,7 +61,12 @@ readonly KTREE="${KERNEL_OUT}/build/linux-${KVER}"
 [[ -d "$KTREE" ]] || die "kernel tree $KTREE missing — run 'steep kernel --kernel-config-fragment kernel/gpu.config' first."
 grep -qx 'CONFIG_MODULES=y' "$KTREE/.config" || \
   die "kernel at $KTREE was built WITHOUT CONFIG_MODULES=y — rebuild with --kernel-config-fragment kernel/gpu.config."
-[[ -f "$KTREE/Module.symvers" ]] || die "$KTREE/Module.symvers missing — kernel build incomplete."
+# `make bzImage` emits vmlinux.symvers; Module.symvers is only created by
+# `make modules`. MODVERSIONS is off in our config, so the two carry the same
+# information — the nspawn build below derives Module.symvers from
+# vmlinux.symvers. Accept either here.
+[[ -f "$KTREE/Module.symvers" || -f "$KTREE/vmlinux.symvers" ]] || \
+  die "$KTREE/{Module,vmlinux}.symvers missing — kernel build incomplete."
 [[ -f "$KTREE/certs/signing_key.pem" && -f "$KTREE/certs/signing_key.x509" ]] || \
   die "module signing key not found under $KTREE/certs — MODULE_SIG=y should have generated it."
 [[ -x "$KTREE/scripts/sign-file" ]] || die "$KTREE/scripts/sign-file missing — cannot sign modules."
@@ -90,7 +95,9 @@ fetch "$RUN_INSTALLER" "$RUN_SHA256" "$CACHE/NVIDIA-${NV_VERSION}.run"
 # Part 1: build + sign the kernel modules
 # =============================================================================
 log "Building NVIDIA kernel modules against linux-$KVER (kernel-builder toolchain)"
-rm -rf "$WORK/ogkm"
+# The build runs as root inside nspawn and writes to this bind-mounted dir, so
+# a prior run leaves root-owned artifacts here — fall back to sudo to clear it.
+rm -rf "$WORK/ogkm" 2>/dev/null || sudo rm -rf "$WORK/ogkm"
 mkdir -p "$WORK/ogkm"
 tar -xzf "$CACHE/ogkm-${NV_VERSION}.tar.gz" -C "$WORK/ogkm" --strip-components=1
 
@@ -100,6 +107,10 @@ tar -xzf "$CACHE/ogkm-${NV_VERSION}.tar.gz" -C "$WORK/ogkm" --strip-components=1
 KTREE_ABS="$(cd "$KTREE" && pwd)"
 OGKM_ABS="$(cd "$WORK/ogkm" && pwd)"
 NPROC="$(nproc)"
+# Build ONLY the modules we ship (WANT_MODULES without the .ko suffix). The
+# default set also builds nvidia-modeset + nvidia-drm, which need g++ and
+# CONFIG_DRM (both absent by design) — restricting the set skips them cleanly.
+NV_NAMES="${WANT_MODULES[*]%.ko}"
 sudo systemd-nspawn --quiet --register=no --keep-unit --ephemeral \
   --directory "$TOOLS_TREE" \
   --bind "${KTREE_ABS}:/ksrc" \
@@ -109,14 +120,32 @@ sudo systemd-nspawn --quiet --register=no --keep-unit --ephemeral \
   --setenv KBUILD_BUILD_USER=steep \
   --setenv KBUILD_BUILD_HOST=steep \
   /bin/bash -c "set -eux
+    # OOT module builds read Module.symvers; \`make bzImage\` only left
+    # vmlinux.symvers. MODVERSIONS is off, so derive the former from the latter.
+    [ -f /ksrc/Module.symvers ] || cp /ksrc/vmlinux.symvers /ksrc/Module.symvers
     # Ensure the tree can host out-of-tree module builds.
     make -C /ksrc modules_prepare
-    # Open GPU kernel modules build. SYSSRC points at our kernel tree.
-    make -C /nv SYSSRC=/ksrc -j${NPROC} modules
+    # Build ONLY the nvidia OS-agnostic object (src/nvidia, gcc). We deliberately
+    # do NOT use the top-level 'modules' target: it hardcodes building
+    # src/nvidia-modeset too, which needs g++ and (for its .ko) CONFIG_DRM —
+    # neither of which we want. NV_KERNEL_MODULES already excludes the modeset
+    # .ko; this also skips its object build.
+    make -C /nv SYSSRC=/ksrc -j${NPROC} kernel-open/nvidia/nv-kernel.o_binary
+    # Then build just the .ko we ship, straight from kernel-open/ via kbuild.
+    make -C /nv/kernel-open SYSSRC=/ksrc NV_KERNEL_MODULES='${NV_NAMES}' -j${NPROC} modules
     test -f /nv/kernel-open/nvidia.ko"
+
+# The nspawn build ran as root (uid 0 in container == uid 0 on host via the
+# bind mount), so the .ko outputs are root-owned. Chown the tree back so the
+# in-place sign-file, cp, and depmod below all work as the invoking user.
+sudo chown -R "$(id -u):$(id -g)" "$WORK/ogkm"
 
 # --- Sign + stage the modules -------------------------------------------------
 log "Signing modules with the kernel's ephemeral key and staging"
+# The signing key was generated root-owned 0600 by the in-nspawn kernel build,
+# so the unprivileged host-side sign-file can't read it. Chown it to this user
+# (it's an ephemeral throwaway key discarded with the build tree).
+sudo chown "$(id -u):$(id -g)" "$KTREE/certs/signing_key.pem" "$KTREE/certs/signing_key.x509"
 MODDIR="$STAGE/usr/lib/modules/${KVER}/kernel/drivers/video"
 mkdir -p "$MODDIR"
 for ko in "${WANT_MODULES[@]}"; do
@@ -133,7 +162,14 @@ done
 # alias maps so `modprobe nvidia` resolves. Run it against the staging root
 # (offline) using the kernel tree's own module ordering.
 log "Running depmod over the staged module tree"
+# depmod -b searches <basedir>/lib/modules, but we stage under usr/lib/modules
+# (matching where steep's build.rs puts vmlinuz). Bridge with a temporary
+# lib -> usr/lib symlink (which mirrors the image's own usrmerge), run depmod
+# so modules.dep lands in usr/lib/modules/<ver>, then drop the symlink so we
+# don't ship a /lib symlink via mkosi.extra.
+ln -sfn usr/lib "$STAGE/lib"
 depmod -b "$STAGE" -F "$KTREE/System.map" "$KVER"
+rm -f "$STAGE/lib"
 
 # =============================================================================
 # Part 2: stage the GPU userspace + GSP firmware from the .run installer
