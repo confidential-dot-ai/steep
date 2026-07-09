@@ -176,7 +176,7 @@ steep igvm output/myimage --smp 1 2 4 8 --firmware output/OVMF.fd
 
 ## Kernel fragments
 
-Steep ships a hardened guest kernel built from `kernel/version` (linux 6.12.84) with two **always-applied** fragments, plus an optional caller-supplied one.
+Steep ships a hardened guest kernel built from `kernel/version` (linux 6.16.12) with two **always-applied** fragments, plus an optional caller-supplied one.
 
 | Fragment | What it adds | Applied |
 |---|---|---|
