@@ -1,5 +1,8 @@
 # igvm-tools
 
+> Vendored into [steep](https://github.com/confidential-dot-ai/steep) from the
+> original `igvm-tools` repository; developed in-tree since. AGPL-3.0.
+
 Build and measure IGVM files for AMD SEV-SNP confidential VMs running on **QEMU+KVM**.
 
 
@@ -12,13 +15,13 @@ Other VMMs (cloud-hypervisor, Firecracker, Hyper-V) process IGVM directives diff
 ### Roadmap
 
 - **Additional VMMs** — support for cloud-hypervisor and other IGVM-capable VMMs is planned.
-- **Intel TDX** — TDX uses a fundamentally different measurement model (MRTD via `TDH.MR.EXTEND`) and is not yet supported. TDX support is planned for a future release.
+- **Intel TDX** — TDX uses a fundamentally different measurement model (MRTD via `TDH.MR.EXTEND`). Intel TDX measurement is handled by the sibling [`tdx-measure`](../tdx-measure) crate; igvm-tools itself is SNP-only.
 
 ## Install
 
 ```bash
-git clone https://github.com/confidential-dot-ai/igvm-tools.git
-cargo install --path .
+git clone https://github.com/confidential-dot-ai/steep.git
+cargo install --path steep/crates/igvm-tools
 ```
 
 ## OVMF firmware
