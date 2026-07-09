@@ -62,7 +62,7 @@ mkosi directly.
 
 ### `steep build` — build a VM image
 
-Produces `output/<name>/{disk.raw, uki.efi, manifest.json, roothash}` and optionally `guest.igvm`.
+Produces `output/<name>/{disk.raw, uki.efi, manifest.json, roothash}` and (unless `--platform tdx`/`--skip-igvm`) one `guest-smp<N>.igvm` per `--smp` value.
 
 ```bash
 steep build [OPTIONS] [NAME]
@@ -81,7 +81,7 @@ steep build [OPTIONS] [NAME]
 | `--firmware <PATH>` | `output/OVMF.fd` (env: `STEEP_FIRMWARE`) | OVMF firmware binary used for SNP launch. Must be steep's edk2 build with the `IgvmHobArea` region (region type 0x200) — IGVM construction injects UKI/shim/cert bytes into that area. Ubuntu's stock OVMF does not have this region and will fail IGVM build. |
 | `--tdx-firmware <PATH>` | `/usr/share/ovmf/OVMF.fd` (env: `STEEP_TDX_FIRMWARE`) | OVMF firmware used for TDX measurement. Must be a build with TDVF code paths compiled in (the `ovmf` package binary works). Steep's IGVM-aware firmware does NOT include TDVF — a TDX guest booted on it hangs silently in firmware. The TDX `mrtd` in the manifest is the hash of THIS firmware, not `--firmware`. Ignored when `--platform snp`. |
 | `--memory <SIZE>` | `4G` | VM memory recorded in `manifest.json` (`build.memory`). `steep run` reads this when booting the image; not used at build time. QEMU-style suffix (`512M`, `8G`, `64G`). |
-| `--smp <N>` | `2` | vCPU count recorded in `manifest.json` (`build.smp`), used by `steep run` and (when generating IGVM) by the SNP launch measurement computation. |
+| `--smp <N>...` | `2 4 8 16` | vCPU counts to build IGVM variants for. Repeatable/space-separated. Each count produces a `guest-smp<N>.igvm` and an `snp_variants[]` manifest entry (SMP count is part of the SNP launch measurement). Recorded in `manifest.json`; `steep run` picks a variant from it. |
 
 #### Examples
 
@@ -168,7 +168,7 @@ steep pull [OPTIONS] <NAME>
 
 ### `steep igvm` — generate additional IGVM SMP variants
 
-After `steep build` with `--smp N`, the manifest captures one IGVM. If you want to publish the same image with multiple SMP counts (each producing a distinct launch digest, since SMP is part of the measurement), `steep igvm` re-renders the IGVM for additional counts:
+`steep build` already emits one IGVM per `--smp` value. If you later need additional SMP counts for an existing build (each producing a distinct launch digest, since SMP is part of the measurement), `steep igvm` re-renders IGVMs without rebuilding:
 
 ```bash
 steep igvm output/myimage --smp 1 2 4 8 --firmware output/OVMF.fd
@@ -295,7 +295,7 @@ output/<name>/
 │                    per-fragment shas, optional SNP measurement
 ├── OVMF.fd          Firmware (copy of the --firmware input; bundled here so the
 │                    output dir is self-contained for `steep run` and `steep push`)
-└── guest.igvm       IGVM file (absent when --skip-igvm)
+└── guest-smp<N>.igvm  one IGVM per --smp value (absent when --platform tdx / --skip-igvm)
 ```
 
 The manifest is the authoritative description of what's in the build. To verify an image you got from elsewhere, compare `manifest.json`'s `outputs.uki.sha256` and (with IGVM) `measurement.snp_launch_digest` against the published expected values for the build inputs you trust.
