@@ -370,7 +370,10 @@ pub fn run(args: &BuildArgs) -> anyhow::Result<()> {
         }
         out
     } else {
-        println!("\n=== Step 4a: Skipping IGVM (platform = {:?}) ===", platform);
+        println!(
+            "\n=== Step 4a: Skipping IGVM (platform = {:?}) ===",
+            platform
+        );
         Vec::new()
     };
 
@@ -404,8 +407,9 @@ pub fn run(args: &BuildArgs) -> anyhow::Result<()> {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("TDX firmware path required for TDX measurement"))?;
         let disk_bytes = fs_err::read(&disk_path)?;
-        let m = tdx_measure::measure_uki_topology_invariant(fw_bytes, &uki_bytes, Some(&disk_bytes))
-            .map_err(|e| anyhow::anyhow!("TDX measurement failed: {e}"))?;
+        let m =
+            tdx_measure::measure_uki_topology_invariant(fw_bytes, &uki_bytes, Some(&disk_bytes))
+                .map_err(|e| anyhow::anyhow!("TDX measurement failed: {e}"))?;
         println!("  MRTD:    {}", m.mrtd);
         println!("  RTMR[1]: {}", m.rtmr1);
         println!("  RTMR[2]: {}", m.rtmr2);
@@ -425,7 +429,10 @@ pub fn run(args: &BuildArgs) -> anyhow::Result<()> {
             firmware: tdx_fw_entry,
         })
     } else {
-        println!("\n=== Step 4b: Skipping TDX measurement (platform = {:?}) ===", platform);
+        println!(
+            "\n=== Step 4b: Skipping TDX measurement (platform = {:?}) ===",
+            platform
+        );
         None
     };
 
@@ -672,7 +679,10 @@ fn assemble_initrd_with_trusted_dsdt(
     tools::run_command_streaming("iasl", &["-p", &dsdt_aml_str, &dsdt_asl_str])
         .map_err(|e| anyhow::anyhow!("iasl failed compiling {}: {}", dsdt_asl.display(), e))?;
     if !dsdt_aml.exists() {
-        anyhow::bail!("iasl reported success but {} is missing", dsdt_aml.display());
+        anyhow::bail!(
+            "iasl reported success but {} is missing",
+            dsdt_aml.display()
+        );
     }
 
     // Stage the AML in the path layout CONFIG_ACPI_TABLE_UPGRADE expects:
@@ -813,7 +823,10 @@ fn build_early_cpio(root: &Path, out: &Path) -> anyhow::Result<()> {
         );
     }
     if !sort_status.success() {
-        anyhow::bail!("sort failed sorting cpio input (exit {:?})", sort_status.code());
+        anyhow::bail!(
+            "sort failed sorting cpio input (exit {:?})",
+            sort_status.code()
+        );
     }
     if !cpio_output.status.success() {
         anyhow::bail!(
@@ -1061,7 +1074,9 @@ mod tests {
         // The aml file's bytes should appear verbatim somewhere in the
         // archive (newc stores file data inline after each header).
         assert!(
-            bytes.windows(b"DSDT-fake-aml".len()).any(|w| w == b"DSDT-fake-aml"),
+            bytes
+                .windows(b"DSDT-fake-aml".len())
+                .any(|w| w == b"DSDT-fake-aml"),
             "cpio archive should embed the staged file data"
         );
     }

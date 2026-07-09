@@ -100,9 +100,9 @@ fn push_cdi(dir: &Path, files: &[OsString], image_ref: &str) -> anyhow::Result<(
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| std::env::current_dir().unwrap());
-    let tarball_basename = tarball_path
-        .file_name()
-        .ok_or_else(|| anyhow::anyhow!("tarball path has no basename: {}", tarball_path.display()))?;
+    let tarball_basename = tarball_path.file_name().ok_or_else(|| {
+        anyhow::anyhow!("tarball path has no basename: {}", tarball_path.display())
+    })?;
 
     // Stage a minimal OCI image config alongside the tarball. CDI's
     // registry importer rejects artifacts whose top-level `artifactType`
