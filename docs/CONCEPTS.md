@@ -418,7 +418,7 @@ These terms describe different layers:
 
 **UKI** (`image.efi`) — kernel + initrd + boot parameters bundled into one EFI binary. It's the thing the firmware actually loads.
 
-**IGVM** (`guest.igvm`) — firmware (OVMF) + UKI bundled into a measured package for confidential VMs. The outermost layer.
+**IGVM** (`guest-smp<N>.igvm`) — firmware (OVMF) + UKI bundled into a measured package for confidential VMs, one per vCPU count. The outermost layer.
 
 The nesting:
 
