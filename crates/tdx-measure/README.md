@@ -1,5 +1,7 @@
 # tdx-measure
 
+> Part of [steep](https://github.com/confidential-dot-ai/steep). Apache-2.0.
+
 Offline TDX measurement computation and attestation verification.
 
 This crate is the TDX counterpart to `igvm-tools` (SEV-SNP launch
