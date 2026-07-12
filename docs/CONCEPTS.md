@@ -376,6 +376,8 @@ Boot 2:  upper = empty    -> everything from boot 1 is gone
 
 The tradeoff: **nothing persists across reboots**. Logs, config changes, installed packages — all gone. That's by design for a confidential VM where you want a known-good state every boot. If you need persistence, you'd attach a separate data disk that isn't part of the verified root.
 
+The upper layer doesn't have to be RAM, though. `steep run --scratch 20G` attaches a disk that the initrd detects (by its virtio-blk serial number `confai-scratch`), encrypts with a random per-boot key that never leaves RAM, formats as ext4, and uses as the overlay's upper layer instead of tmpfs. Same ephemerality — the key is gone at shutdown, so the data is unrecoverable — but with disk-sized capacity. See [DEPLOYING.md](DEPLOYING.md#storage).
+
 ---
 
 ## 12. What is mkosi?
@@ -493,3 +495,57 @@ IGVM launch digest    (measurement of firmware + UKI by SNP hardware)
 ```
 
 Change one file in the root -> different roothash -> different UKI -> different IGVM launch digest. A remote verifier checks the launch digest and can trust the entire stack.
+
+---
+
+## 17. How TDX measurement works
+
+Sections 13–16 describe the SNP path, where everything is bundled into an
+IGVM and hashed into a single launch digest. Intel TDX reaches the same
+goal — "a remote verifier knows exactly what booted" — with a different
+mechanism: a set of measurement registers instead of one digest.
+
+- **MRTD** — the build-time measurement of the firmware (TDVF). Computed
+  by simulating the TDX module's `MEM.PAGE.ADD` + `MR.EXTEND` sequence
+  over the firmware binary.
+- **RTMR[0..3]** — four Run-Time Measurement Registers, extended
+  hash-chain-style (like TPM PCRs) as boot proceeds. RTMR[1] covers the
+  UKI's PE image identity; RTMR[2] covers the UKI's internal sections
+  (kernel, cmdline — including the verity roothash — and initrd).
+- **CCEL** — the CC Event Log, which records every RTMR extension so a
+  verifier can replay and audit how each register got its value.
+
+`steep build` precomputes MRTD, RTMR[1], and RTMR[2] offline (via the
+`tdx-measure` crate) and publishes them in `manifest.json` as the `tdx`
+block. RTMR[0] is deliberately **not** pinned: it contains
+host-configuration-dependent ACPI content that varies with memory size
+and vCPU count. What makes that safe is the trusted DSDT (next section).
+See [THREAT_MODEL.md](THREAT_MODEL.md) for the full argument.
+
+---
+
+## 18. The trusted DSDT
+
+ACPI tables describe the machine's hardware to the OS — and one of them,
+the DSDT, contains *executable* bytecode (AML) that the kernel runs. On
+TDX, ACPI tables are supplied by the untrusted host and land in
+unpinned RTMR[0], so a malicious host could feed the guest malicious AML
+("BadAML" attacks).
+
+Steep's defense: ship a known-good DSDT inside the **measured** initrd
+and have the kernel prefer it over whatever the host provides.
+
+1. `mkosi/base/acpi-tables/dsdt.asl` is the audited DSDT source; the
+   build compiles it with `iasl` and prepends it to the initrd as an
+   uncompressed early cpio (the format the kernel's ACPI table-upgrade
+   mechanism expects).
+2. The kernel is built with `CONFIG_ACPI_TABLE_UPGRADE=y`
+   (re-enabled by `kernel/confidential.config` after
+   `hardening.config` turns it off) so at boot it swaps in the DSDT
+   from the initrd — which is measured into RTMR[2] via the UKI.
+3. Result: the executable ACPI content the guest runs is covered by the
+   published measurements even though RTMR[0] is not pinned, and the
+   `tdx` manifest block stays valid for **any** memory/vCPU topology.
+
+You can confirm the override happened inside a guest with
+`dmesg | grep "Table Upgrade: override"`.
