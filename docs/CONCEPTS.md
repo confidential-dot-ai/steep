@@ -82,7 +82,7 @@ So most drivers are compiled as **modules** — separate files that can be loade
 
 You load them with `insmod /path/to/module.ko` or `modprobe module-name` (which also handles dependencies). Once loaded, the driver is part of the running kernel — it can register device types, filesystems, crypto algorithms, whatever it provides.
 
-Our initrd carries specific `.ko` files for dm-verity, dm-bufio (buffer I/O layer that dm-verity needs), and overlay. The init script loads them with `insmod` before trying to set up verity or overlayfs.
+Steep's kernel takes the opposite approach: the build applies `mod2yesconfig`, which converts every `=m` option to `=y` — a **module-less kernel**. dm-verity, dm-bufio, overlayfs, virtio, and erofs are all compiled in, so our initrd carries no `.ko` files at all and the init script never runs `insmod`. Nothing can be loaded into the kernel after boot, which also shrinks the attack surface (see `kernel/hardening.config`: `CONFIG_MODULES` is unset).
 
 ---
 
@@ -148,7 +148,7 @@ From the filesystem's perspective, `/dev/mapper/root` is just another block devi
 ```
 App reads /etc/hostname
     |
-ext4 on /dev/mapper/root -> "I need block 12345"
+erofs on /dev/mapper/root -> "I need block 12345"
     |
 dm-verity -> reads block 12345 from /dev/vda2
           -> reads hash for block 12345 from /dev/vda3
@@ -188,9 +188,9 @@ The initrd's `/init` script does whatever prep is needed (load drivers, decrypt 
 Because they serve completely different purposes.
 
 **The initrd** (`mkosi/initrd/`) is a tiny throwaway environment. It exists only during the first few seconds of boot. Ours contains:
-- `cryptsetup` / `veritysetup` — the tool that sets up dm-verity
-- `kmod` — for loading kernel modules (dm-verity, ext4, virtio drivers)
-- `bash` — to run the init script
+- `cryptsetup` / `veritysetup` — the tools that set up dm-verity and the encrypted scratch disk
+- `e2fsprogs` — `mkfs.ext4` for formatting the ephemeral scratch disk
+- `bash`, `mount`, `util-linux`, `zstd` — to run the init script and assemble the root
 - Our custom `/init` script
 
 That's it. ~50MB compressed. It does its job and is discarded.
@@ -213,7 +213,7 @@ A **Unified Kernel Image** bundles three things into a single `.efi` binary:
 3. The kernel command line (boot parameters)
 
 ```
-UKI (.efi) = kernel + initrd + "roothash=abc123 console=ttyS0 ..."
+UKI (.efi) = kernel + initrd + "roothash=abc123 ..."
 ```
 
 Why bundle them? Two reasons:
@@ -233,7 +233,7 @@ The 3-partition layout of our disk:
 
 ```
 Partition 1 (ESP):         EFI boot files (FAT32)
-Partition 2 (root-data):   The ext4 root filesystem, read-only
+Partition 2 (root-data):   The erofs root filesystem, read-only
 Partition 3 (root-verity): The hash tree for partition 2
 ```
 
@@ -384,7 +384,7 @@ mkosi is a tool for building OS images declaratively. Think of it like a Dockerf
 
 Steep uses mkosi twice:
 
-1. **`mkosi/initrd/`** — Builds the minimal cpio initrd (just cryptsetup, kmod, bash, util-linux). Output: `image.cpio.gz`.
+1. **`mkosi/initrd/`** — Builds the minimal cpio initrd (cryptsetup, e2fsprogs, bash, util-linux, zstd). Output: `image.cpio.gz`.
 2. **`mkosi/base/`** — Builds the full Ubuntu disk image with 3 partitions (ESP + root-data + root-verity-hash). Output: `image.raw`, `image.efi` (UKI), `image.roothash`.
 
 Key mkosi directories:
@@ -429,12 +429,12 @@ IGVM contains:
         +-- kernel (vmlinuz)
         +-- initrd (cpio.gz) contains:
         |     +-- /init script
-        |     +-- veritysetup, kernel modules
+        |     +-- veritysetup and userspace tools (no kernel modules — the kernel is module-less)
         +-- cmdline ("roothash=abc123...")
 
 Disk image (.raw) contains:
   +-- Partition 1: ESP (copy of UKI for firmware to find)
-  +-- Partition 2: root filesystem (ext4, the actual OS)
+  +-- Partition 2: root filesystem (erofs, the actual OS)
   +-- Partition 3: verity hash tree
 ```
 
@@ -449,18 +449,19 @@ The IGVM and the disk image are separate files. QEMU loads the IGVM (which boots
       |
 2. IGVM contains OVMF firmware + UKI
       |
-3. Firmware starts, finds UKI on ESP, executes it
+3. Firmware starts and executes the UKI (on SNP it comes measured inside
+   the IGVM itself; on the KVM/emulated dev paths `steep run` hands the
+   UKI directly to QEMU via `-kernel`)
       |
 4. Kernel starts with initrd in RAM
       |
 5. /init runs:
-   a. Load kernel modules (dm-verity, ext4, virtio)
-   b. Parse roothash from kernel cmdline
-   c. Wait for /dev/vda2 to appear
-   d. veritysetup open /dev/vda2 root /dev/vda3 <roothash>
-   e. Mount /dev/mapper/root read-only -> /sysroot-lower
-   f. Mount tmpfs overlay -> /sysroot (writes go to RAM)
-   g. Switch root to /sysroot
+   a. Parse roothash from kernel cmdline (no module loading — everything is compiled in)
+   b. Wait for /dev/vda2 to appear
+   c. veritysetup open /dev/vda2 root /dev/vda3 <roothash>
+   d. Mount /dev/mapper/root read-only -> /sysroot-lower
+   e. Mount tmpfs overlay -> /sysroot (writes go to RAM)
+   f. Switch root to /sysroot
       |
 6. systemd starts from the verified root
       |
@@ -479,7 +480,7 @@ This is what makes the whole system trustworthy for remote attestation:
 cloud-init YAML  (included in image)
        |
        v
-ext4 root filesystem  (contains all OS files + cloud-init config)
+erofs root filesystem  (contains all OS files + cloud-init config)
        |
        v
 dm-verity root hash   (single hash representing entire root filesystem)
