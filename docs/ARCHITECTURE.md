@@ -17,12 +17,12 @@ hardware will measure at launch.
 bin/steep build
    │
    ├─ 1. kernel        src/commands/kernel.rs + src/kernel/*    (cached)
-   ├─ 2. base image    mkosi/base/ via mkosi                    (reproducible rootfs)
-   ├─ 3. initrd + DSDT mkosi/initrd/ + iasl early-cpio prepend
-   ├─ 4. UKI + verity  mkosi (erofs + verity + ukify)  → disk.raw, uki.efi, roothash
-   ├─ 5. SNP measure   src/igvm/ → crates/igvm-tools   → guest-smp<N>.igvm + digests
-   ├─ 6. TDX measure   crates/tdx-measure (library)    → mrtd/rtmr1/rtmr2
-   └─ 7. manifest      src/manifest.rs                 → manifest.json
+   ├─ 2. initrd + DSDT mkosi/initrd/ + iasl early-cpio prepend
+   ├─ 3. image         mkosi/base/ via mkosi (reproducible rootfs
+   │                   + erofs + verity + ukify)       → disk.raw, uki.efi, roothash
+   ├─ 4. SNP measure   src/igvm/ → crates/igvm-tools   → guest-smp<N>.igvm + digests
+   ├─ 5. TDX measure   crates/tdx-measure (library)    → mrtd/rtmr1/rtmr2
+   └─ 6. manifest      src/manifest.rs                 → manifest.json
 ```
 
 ## Repository layout
@@ -42,7 +42,7 @@ bin/steep build
 | `kernel_cache.rs` | Thin cache-aware accessor `commands/build.rs` uses to get a kernel artifact |
 | `igvm/invoke.rs` | Bridges to the `igvm-tools` crate to emit IGVMs and capture digests |
 | `manifest.rs` | Manifest schema (v3), hashing helpers, version-gated reader — see [MANIFEST.md](MANIFEST.md) |
-| `qemu.rs` | QEMU invocation: tier probing (SNP → KVM → emulated), argument construction, scratch-disk attachment (virtio serial `confai-scratch`), memory-string validation |
+| `qemu.rs` | QEMU invocation: tier probing (SNP → KVM → emulated), argument construction, scratch-disk attachment (virtio-blk serial number `confai-scratch`), memory-string validation |
 | `tools.rs` | External-tool discovery and subprocess error handling |
 
 ### Kernel configuration model
