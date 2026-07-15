@@ -79,28 +79,40 @@ jobs:
 
       # Keyed on the c8s fragment (not kernel/* like base.yml) so the c8s
       # kernel lineage doesn't thrash the base lineage's cache and vice
-      # versa. confos's own fingerprint still forces a recompile if anything
-      # stale slips through.
+      # versa. Every input of confos's kernel fingerprint is in the key —
+      # anything less restores a stale kernel that the fingerprint then
+      # rejects, forcing a recompile whose result can never be saved under
+      # the already-taken key. (hashFiles has no brace expansion; list files
+      # individually.)
       - name: Cache kernel
         uses: actions/cache@v5
         with:
           path: output/kernel
-          key: ${{ runner.os }}-kernel-c8s-${{ hashFiles('mkosi/kernel-builder/{mkosi.conf,mkosi.tools.manifest}','kernel/c8s.config','kernel/config-x86_64.snapshot','kernel/version') }}
+          key: ${{ runner.os }}-kernel-c8s-${{ hashFiles('mkosi/kernel-builder/mkosi.conf','kernel/c8s.config','kernel/required.config','kernel/hardening.config','kernel/confidential.config','kernel/config-x86_64.snapshot','kernel/version') }}
 
+      # Distinct key prefix from base.yml: the c8s build's profiles add
+      # ToolsTreePackages (oras, jq, curl), so the tree differs from the
+      # base build's under what would otherwise be the same key.
       - name: Cache base image tools
         uses: actions/cache@v5
         with:
-          path: mkosi/base/mkosi.tools
-          key: ${{ runner.os }}-tools-${{ hashFiles('mkosi/base/mkosi.conf.d/tools.conf') }}
+          path: |
+            mkosi/base/mkosi.tools
+            mkosi/base/mkosi.tools.manifest
+          key: ${{ runner.os }}-c8s-tools-${{ hashFiles('mkosi/base/mkosi.conf.d/tools.conf','mkosi/base/mkosi.profiles/*/mkosi.conf') }}
 
       # The c8s profile's mkosi.sync downloads ~3.5G of pinned artifacts
       # (rke2 tarball + airgap bundles) into mkosi.pkgcache/c8s and verifies
-      # by sha256 on reuse — cache it keyed on the pins.
+      # by sha256 on reuse — cache it keyed on the pins. restore-keys makes
+      # any sync edit a partial re-download instead of a full one (stale
+      # entries are sha-verified, so restoring an old cache is safe).
       - name: Cache c8s artifact downloads
         uses: actions/cache@v5
         with:
           path: mkosi/base/mkosi.pkgcache/c8s
           key: ${{ runner.os }}-c8s-artifacts-${{ hashFiles('mkosi/base/mkosi.profiles/c8s/mkosi.sync') }}
+          restore-keys: |
+            ${{ runner.os }}-c8s-artifacts-
 
       - name: Build c8s image
         env:
@@ -117,17 +129,22 @@ jobs:
 
       # Skip the multi-GB push when the rootfs is byte-identical to what's
       # already published: the verity roothash is a content hash of the
-      # entire rootfs. Best-effort — any miss falls through to publishing.
-      - name: Setup crane
-        uses: imjasonh/setup-crane@v0.4
+      # entire rootfs. The :c8s artifact stores roothash as its own titled
+      # layer, so the published value is a few-KB blob fetch. Best-effort —
+      # any miss falls through to publishing.
       - name: Check whether the rootfs changed
         id: changed
         run: |
           set -uo pipefail
           REPO=$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')
           new=$(cat output/c8s/roothash 2>/dev/null || echo new)
-          pub=$(crane export "ghcr.io/${REPO}:c8s-cdi" - 2>/dev/null \
-                  | tar -xO roothash 2>/dev/null || echo none)
+          digest=$(oras manifest fetch "ghcr.io/${REPO}:c8s" 2>/dev/null \
+                     | jq -r '.layers[] | select(.annotations["org.opencontainers.image.title"] == "roothash") | .digest' \
+                     || true)
+          pub=none
+          if [ -n "$digest" ]; then
+            pub=$(oras blob fetch --output - "ghcr.io/${REPO}@${digest}" 2>/dev/null || echo none)
+          fi
           echo "new=$new published=$pub"
           if [ "$new" = "$pub" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
@@ -144,21 +161,21 @@ jobs:
           REPO=$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')
           IMAGE="ghcr.io/${REPO}"
 
-          # Artifact push (per-file layers): manifest.json + roothash +
-          # uki.efi + disk.raw + OVMF.tdx.fd (all already in output/c8s/),
-          # for verifiers and `confos pull`.
-          (cd output/c8s && oras push "${IMAGE}:c8s,c8s-${SHORT_SHA}" \
-            --artifact-type application/vnd.confos.image.v1 \
-            ./*)
-
-          # CDI-compatible single-layer image for the KubeVirt CDI registry
-          # importer (disk.raw under disk/). Tagged :c8s-cdi so the
-          # roothash change-check above has a stable reference.
-          for tag in c8s-cdi c8s-cdi-${SHORT_SHA}; do
-            bin/confos push output/c8s --cdi \
-              --registry "$IMAGE" \
-              --tag "$tag"
-          done
+          # confos push passes the tag list into the oras ref verbatim, so
+          # one invocation covers both tags (one CDI tarball build, one
+          # layer upload).
+          #
+          # CDI-compatible single-layer image first (disk.raw under disk/,
+          # for the KubeVirt CDI registry importer), the :c8s artifact
+          # (per-file layers, for verifiers and `confos pull`) last: the
+          # change-check above reads :c8s, so a partial failure here leaves
+          # it stale and the next run re-publishes everything.
+          bin/confos push output/c8s --cdi \
+            --registry "$IMAGE" \
+            --tag "c8s-cdi,c8s-cdi-${SHORT_SHA}"
+          bin/confos push output/c8s \
+            --registry "$IMAGE" \
+            --tag "c8s,c8s-${SHORT_SHA}"
 
       - name: Summary
         run: |

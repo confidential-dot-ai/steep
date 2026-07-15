@@ -42,22 +42,20 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 FRAGMENT=kernel/c8s.config
 KB_PKGS=dwarves,python3,pkg-config,zlib1g-dev
-PROFILES=(--profile gpu --profile attest-gpu --profile c8s)
-if [ "${C8S_NO_GPU:-0}" = 1 ]; then
-    PROFILES=(--profile attest --profile c8s)
-elif [ "${C8S_STOCK_ATTEST:-0}" = 1 ]; then
-    PROFILES=(--profile gpu --profile attest --profile c8s)
-fi
 
 bin/confos kernel \
     --kernel-config-fragment "$FRAGMENT" \
     --kernel-builder-package "$KB_PKGS"
 
-if [ "${C8S_NO_GPU:-0}" != 1 ]; then
+if [ "${C8S_NO_GPU:-0}" = 1 ]; then
+    PROFILES=(--profile attest --profile c8s)
+elif [ "${C8S_STOCK_ATTEST:-0}" = 1 ]; then
+    PROFILES=(--profile gpu --profile attest --profile c8s)
     bin/steep-fetch-gpu
-    if [ "${C8S_STOCK_ATTEST:-0}" != 1 ]; then
-        bin/steep-fetch-attest-gpu
-    fi
+else
+    PROFILES=(--profile gpu --profile attest-gpu --profile c8s)
+    bin/steep-fetch-gpu
+    bin/steep-fetch-attest-gpu
 fi
 
 exec bin/confos build "${C8S_NAME:-c8s}" \
