@@ -117,26 +117,36 @@ pub fn run_configure_phase(
     verify_fragment_options(&fragments, &kernel_dir_abs.join(".config"))
 }
 
-/// Fail if any `CONFIG_X=y` requested by the fragments is absent from the
-/// resolved `.config`. `olddefconfig` drops an option whose Kconfig
-/// dependency is unmet (or whose symbol no longer exists) without any error
-/// — the miss otherwise surfaces only as runtime misbehavior, long after the
-/// expensive build (e.g. NETFILTER_XT_MATCH_OWNER silently dropped because
-/// NETFILTER_ADVANCED was unset). (`=m` collapses to `=y` via mod2yesconfig
-/// before olddefconfig, so checking `=y` is sufficient for this module-less
-/// build.)
+/// Fail if the resolved `.config` disagrees with what the fragments
+/// requested, in either direction. `olddefconfig` silently drops a
+/// `CONFIG_X=y` whose Kconfig dependency is unmet (e.g.
+/// NETFILTER_XT_MATCH_OWNER dropped because NETFILTER_ADVANCED was unset),
+/// and just as silently force-enables a `# CONFIG_X is not set` when the
+/// symbol is promptless or select'ed by an enabled one (e.g. MOUSE_PS2
+/// selects SERIO_I8042) — both otherwise surface only as runtime
+/// misbehavior or a quietly weaker kernel, long after the expensive build.
+/// (`=m` counts as an on-request: mod2yesconfig collapses it to `=y` in
+/// this module-less build. Non-boolean values are not verified.)
 ///
 /// Fragments merge with last-wins semantics (see [`run_configure_phase`]),
 /// so only each symbol's final requested state is checked: a later fragment
 /// that sets `# CONFIG_X is not set` retracts an earlier `CONFIG_X=y`
 /// request (e.g. c8s.config disables hardening.config's RANDSTRUCT_FULL,
-/// which DEBUG_INFO_BTF is incompatible with).
+/// which DEBUG_INFO_BTF is incompatible with) — and vice versa.
 fn verify_fragment_options(fragments: &[&Path], resolved: &Path) -> Result<()> {
     let config = fs_err::read_to_string(resolved)?;
-    let enabled: std::collections::HashSet<&str> = config.lines().collect();
-    // symbol -> Some((requesting fragment, `CONFIG_X=y` line)) for a live
-    // `=y` request, None once a later fragment sets any other value.
-    let mut requested: std::collections::BTreeMap<String, Option<(String, String)>> =
+    // symbol -> full `CONFIG_X=...` line from the resolved .config.
+    let resolved_set: std::collections::HashMap<&str, &str> = config
+        .lines()
+        .filter(|l| l.starts_with("CONFIG_"))
+        .filter_map(|l| l.split_once('=').map(|(symbol, _)| (symbol, l)))
+        .collect();
+    // symbol -> final request across fragments (last fragment wins):
+    //   Some((fragment, true))  — must resolve `=y` (`=m` collapses via
+    //                             mod2yesconfig in this module-less build)
+    //   Some((fragment, false)) — must resolve off (`# is not set`/absent)
+    //   None                    — non-boolean value; not verified
+    let mut requested: std::collections::BTreeMap<String, Option<(String, bool)>> =
         Default::default();
     for frag in fragments {
         let name = frag.file_name().unwrap_or_default().to_string_lossy();
@@ -144,36 +154,43 @@ fn verify_fragment_options(fragments: &[&Path], resolved: &Path) -> Result<()> {
             // Match on the first whitespace-delimited token so a trailing
             // comment can't smuggle a request past verification.
             let token = line.split_whitespace().next().unwrap_or("");
-            if let Some((symbol, _)) = token
+            if let Some((symbol, value)) = token
                 .split_once('=')
                 .filter(|_| token.starts_with("CONFIG_"))
             {
-                let request = token
-                    .ends_with("=y")
-                    .then(|| (name.to_string(), token.to_string()));
+                let request = matches!(value, "y" | "m").then(|| (name.to_string(), true));
                 requested.insert(symbol.to_string(), request);
             } else if let Some(symbol) = line
                 .strip_prefix("# ")
                 .and_then(|r| r.strip_suffix(" is not set"))
                 .filter(|s| s.starts_with("CONFIG_"))
             {
-                requested.insert(symbol.to_string(), None);
+                requested.insert(symbol.to_string(), Some((name.to_string(), false)));
             }
         }
     }
     let missing: Vec<String> = requested
-        .into_values()
-        .flatten()
-        .filter(|(_, line)| !enabled.contains(line.as_str()))
-        .map(|(name, line)| format!("  - {}: {}", name, line.trim_end_matches("=y")))
+        .iter()
+        .filter_map(|(symbol, req)| req.as_ref().map(|(name, want_on)| (symbol, name, want_on)))
+        .filter_map(|(symbol, name, want_on)| {
+            let line = resolved_set.get(symbol.as_str()).copied();
+            match (want_on, line) {
+                (true, Some(l)) if l == format!("{symbol}=y") => None,
+                (true, _) => Some(format!("  - {name}: {symbol} requested on, dropped")),
+                (false, Some(l)) => Some(format!("  - {name}: {symbol} requested off, got {l}")),
+                (false, None) => None,
+            }
+        })
         .collect();
     if missing.is_empty() {
         Ok(())
     } else {
         Err(anyhow!(
-            "kernel options requested in a config fragment were dropped by olddefconfig \
-             (unmet Kconfig dependency or removed symbol):\n{}\n\
-             Add the missing dependency to the fragment and rebuild.",
+            "kernel options requested in a config fragment do not match the resolved \
+             .config (olddefconfig drops =y requests with unmet dependencies and \
+             force-enables `is not set` requests for selected/promptless symbols):\n{}\n\
+             Fix the fragment (add the missing dependency, or unset the selecting \
+             symbol / document the force-enable) and rebuild.",
             missing.join("\n")
         ))
     }
@@ -251,7 +268,7 @@ mod tests {
     fn verify_fragment_options_passes_when_all_requested_options_present() {
         let d = TempDir::new().unwrap();
         let frag = write(&d, "frag.config", "# comment\nCONFIG_A=y\nCONFIG_B=m\n");
-        let resolved = write(&d, "resolved", "CONFIG_A=y\nCONFIG_C=y\n");
+        let resolved = write(&d, "resolved", "CONFIG_A=y\nCONFIG_B=y\nCONFIG_C=y\n");
         verify_fragment_options(&[frag.as_path()], &resolved).unwrap();
     }
 
@@ -268,9 +285,52 @@ mod tests {
     }
 
     #[test]
-    fn verify_fragment_options_ignores_not_set_and_comment_lines() {
+    fn verify_fragment_options_ignores_comment_lines() {
         let d = TempDir::new().unwrap();
-        let frag = write(&d, "frag.config", "# CONFIG_A is not set\n# CONFIG_B=y\n");
+        let frag = write(&d, "frag.config", "# CONFIG_B=y\n# plain comment\n");
+        let resolved = write(&d, "resolved", "CONFIG_C=y\n");
+        verify_fragment_options(&[frag.as_path()], &resolved).unwrap();
+    }
+
+    #[test]
+    fn verify_fragment_options_passes_when_off_request_resolves_off() {
+        let d = TempDir::new().unwrap();
+        let frag = write(&d, "frag.config", "# CONFIG_A is not set\n");
+        // Off in the resolved config as absent (A) or as a not-set comment.
+        let frag2 = write(&d, "frag2.config", "# CONFIG_B is not set\n");
+        let resolved = write(&d, "resolved", "# CONFIG_B is not set\nCONFIG_C=y\n");
+        verify_fragment_options(&[frag.as_path(), frag2.as_path()], &resolved).unwrap();
+    }
+
+    #[test]
+    fn verify_fragment_options_fails_when_off_request_is_force_enabled() {
+        let d = TempDir::new().unwrap();
+        let frag = write(&d, "hardening.config", "# CONFIG_SERIO_I8042 is not set\n");
+        let resolved = write(&d, "resolved", "CONFIG_SERIO_I8042=y\n");
+        let err = verify_fragment_options(&[frag.as_path()], &resolved)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("hardening.config: CONFIG_SERIO_I8042 requested off"));
+    }
+
+    #[test]
+    fn verify_fragment_options_treats_module_request_as_on_request() {
+        let d = TempDir::new().unwrap();
+        let frag = write(&d, "frag.config", "CONFIG_A=m\n");
+        let resolved = write(&d, "resolved", "CONFIG_A=y\n");
+        verify_fragment_options(&[frag.as_path()], &resolved).unwrap();
+        let dropped = write(&d, "resolved2", "CONFIG_B=y\n");
+        assert!(verify_fragment_options(&[frag.as_path()], &dropped).is_err());
+    }
+
+    #[test]
+    fn verify_fragment_options_skips_non_boolean_values() {
+        let d = TempDir::new().unwrap();
+        let frag = write(
+            &d,
+            "frag.config",
+            "CONFIG_PANIC_TIMEOUT=-1\nCONFIG_PATH=\"\"\n",
+        );
         let resolved = write(&d, "resolved", "CONFIG_C=y\n");
         verify_fragment_options(&[frag.as_path()], &resolved).unwrap();
     }
