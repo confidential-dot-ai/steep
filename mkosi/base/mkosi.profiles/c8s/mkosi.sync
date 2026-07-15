@@ -83,23 +83,19 @@ stage() {
 VERSION_URL_SAFE="${RKE2_VERSION//+/%2B}"   # '+' must be %2B in release URLs
 BASE_URL="https://github.com/rancher/rke2/releases/download/${VERSION_URL_SAFE}"
 
-if [ -x "$STAGE_DIR/usr/local/bin/rke2" ]; then
-    echo "c8s sync: rke2 already staged — skipping extract"
-else
-    fetch "${BASE_URL}/rke2.linux-amd64.tar.gz" \
-          "$CACHE_DIR/rke2-${RKE2_VERSION//+/-}.tar.gz" \
-          "$RKE2_TARBALL_SHA256"
-    # Default install prefix. systemd's unit search path includes
-    # /usr/local/lib/systemd/system, so the bundled rke2-server/agent units
-    # need no relocation; the profile's 50-rke2.preset enables/disables them.
-    mkdir -p "$STAGE_DIR/usr/local"
-    tar -xzf "$CACHE_DIR/rke2-${RKE2_VERSION//+/-}.tar.gz" -C "$STAGE_DIR/usr/local"
-    chmod 0755 "$STAGE_DIR/usr/local/bin/rke2" \
-               "$STAGE_DIR/usr/local/bin/rke2-killall.sh" \
-               "$STAGE_DIR/usr/local/bin/rke2-uninstall.sh"
-    # Marker for inspecting a built image.
-    echo "$RKE2_VERSION" > "$STAGE_DIR/usr/local/share/rke2/.confos-baked-version"
-fi
+fetch "${BASE_URL}/rke2.linux-amd64.tar.gz" \
+      "$CACHE_DIR/rke2-${RKE2_VERSION//+/-}.tar.gz" \
+      "$RKE2_TARBALL_SHA256"
+# Default install prefix. systemd's unit search path includes
+# /usr/local/lib/systemd/system, so the bundled rke2-server/agent units
+# need no relocation; the profile's 50-rke2.preset enables/disables them.
+mkdir -p "$STAGE_DIR/usr/local"
+tar -xzf "$CACHE_DIR/rke2-${RKE2_VERSION//+/-}.tar.gz" -C "$STAGE_DIR/usr/local"
+chmod 0755 "$STAGE_DIR/usr/local/bin/rke2" \
+           "$STAGE_DIR/usr/local/bin/rke2-killall.sh" \
+           "$STAGE_DIR/usr/local/bin/rke2-uninstall.sh"
+# Marker for inspecting a built image.
+echo "$RKE2_VERSION" > "$STAGE_DIR/usr/local/share/rke2/.confos-baked-version"
 
 # --- 2. Airgap image bundles (core + cilium) -----------------------------
 
@@ -118,11 +114,6 @@ stage "$CACHE_DIR/rke2-images-cilium-${RKE2_VERSION//+/-}.tar.zst" \
 # --- 3. nri-image-policy plugin binary ------------------------------------
 
 PLUGIN_TARGET="$STAGE_DIR/opt/nri/plugins/10-nri-image-policy"
-if [ -x "$PLUGIN_TARGET" ]; then
-    echo "c8s sync: nri-image-policy already staged — skipping pull"
-    exit 0
-fi
-
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 EXTRACT="$TMP/rootfs"

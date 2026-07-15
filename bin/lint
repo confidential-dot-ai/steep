@@ -1,7 +1,8 @@
 #!/bin/bash
 set -eou pipefail
-set -x
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
+set -x
 cargo fmt --all
 cargo clippy --all-targets "$@" -- -D warnings
 set +x
@@ -9,14 +10,33 @@ set +x
 # kernel/c8s.config must be a superset of kernel/gpu.config: only one
 # --kernel-config-fragment is accepted per build, so the c8s fragment
 # duplicates the gpu lines verbatim. Catch drift when gpu.config changes.
-missing=0
-while IFS= read -r line; do
-    if ! grep -qFx "$line" kernel/c8s.config; then
-        echo "bin/lint: kernel/c8s.config is missing gpu.config line: $line" >&2
-        missing=1
-    fi
-done < <(grep -E '^CONFIG_|^# CONFIG_.* is not set$' kernel/gpu.config)
-if [ "$missing" != 0 ]; then
-    echo "bin/lint: kernel/c8s.config must contain every effective line of kernel/gpu.config" >&2
+[ -f kernel/gpu.config ] && [ -f kernel/c8s.config ] || {
+    echo "bin/lint: kernel/gpu.config or kernel/c8s.config missing" >&2
+    exit 1
+}
+missing=$(grep -E '^CONFIG_|^# CONFIG_.* is not set$' kernel/gpu.config \
+          | grep -vFxf kernel/c8s.config || true)
+if [ -n "$missing" ]; then
+    echo "bin/lint: kernel/c8s.config must contain every effective line of kernel/gpu.config; missing:" >&2
+    echo "$missing" >&2
+    exit 1
+fi
+
+# The NRI_IMAGE digest pinned in the c8s sync must be the one the baked
+# boot policy self-allows, or the measured fail-closed floor denies the
+# very plugin image it ships.
+c8s_profile=mkosi/base/mkosi.profiles/c8s
+nri_digest=$(sed -n 's/^NRI_IMAGE=.*@\(sha256:[a-f0-9]*\)".*$/\1/p' "$c8s_profile/mkosi.sync")
+policy="$c8s_profile/mkosi.extra/etc/nri/conf.d/image-policy.yaml"
+[ -n "$nri_digest" ] && [ -f "$policy" ] || {
+    echo "bin/lint: NRI_IMAGE pin or baked image-policy.yaml not found" >&2
+    exit 1
+}
+if ! grep -qF "$nri_digest" "$policy"; then
+    echo "bin/lint: $policy does not self-allow the NRI_IMAGE digest $nri_digest pinned in mkosi.sync" >&2
+    exit 1
+fi
+if grep -F 'nri-image-policy@sha256:' "$policy" | grep -vqF "$nri_digest"; then
+    echo "bin/lint: $policy references an nri-image-policy digest other than the mkosi.sync pin $nri_digest" >&2
     exit 1
 fi
