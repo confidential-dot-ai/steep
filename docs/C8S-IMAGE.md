@@ -176,8 +176,8 @@ against this image, all verified against the chart source:
   rke2-server restart; CDS-fed allowlist enforced (allowed digest admits,
   unlisted denies); ratls-mesh/tee-proxy functional; chart attestation-api
   coexists with baked :8400.
-- **S5 CI + publish**: c8s.yml green; a no-change rerun hits the crane
-  roothash skip; pulled artifact re-verifies.
+- **S5 CI + publish**: c8s.yml green; a no-change rerun hits the
+  roothash publish-skip; pulled artifact re-verifies.
 
 ## Deferred: GPU pods (follow-up)
 
