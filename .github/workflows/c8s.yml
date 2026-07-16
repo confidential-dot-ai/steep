@@ -24,6 +24,11 @@ on:
         description: "c8s commit short-SHA to bake the c8s binary from (resolves nri-image-policy:<ref>). Empty = the hardcoded NRI_IMAGE digest. The per-commit image must be published (c8s docker.yml)."
         required: false
         default: ""
+      dev:
+        description: "Build the c8s-dev variant (console=ttyS0 + serial root autologin). Same as pushing to ci/publish-c8s-dev-image, but dispatchable so it can carry a c8s_ref."
+        required: false
+        type: boolean
+        default: false
   push:
     branches:
       - ci/publish-c8s-image
@@ -62,9 +67,11 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set image ref and variant
+        # Dev variant when pushing to the dev branch OR when dispatched with
+        # dev=true (so a dispatched build can carry a c8s_ref and still be dev).
         run: |
           echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY@L}" >> "$GITHUB_ENV"
-          if [ "${GITHUB_REF_NAME}" = "ci/publish-c8s-dev-image" ]; then
+          if [ "${GITHUB_REF_NAME}" = "ci/publish-c8s-dev-image" ] || [ "${{ github.event.inputs.dev }}" = "true" ]; then
             echo "VARIANT=c8s-dev" >> "$GITHUB_ENV"
             echo "C8S_DEV=1" >> "$GITHUB_ENV"
           else
