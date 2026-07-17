@@ -40,10 +40,10 @@ pub fn update_snapshot(resolved: &Path, snapshot: &Path) -> Result<bool> {
 ///   make mod2yesconfig
 ///   make olddefconfig
 ///
-/// then verifies every `CONFIG_X=y` requested by the merged fragments (after
-/// last-fragment-wins overrides) is present in the resolved `.config`,
-/// failing the build if `olddefconfig` silently dropped any (unmet Kconfig
-/// dependency or removed symbol).
+/// then verifies the merged fragments' boolean requests (after
+/// last-fragment-wins overrides) against the resolved `.config`, failing
+/// the build if `olddefconfig` silently dropped an on-request or
+/// force-enabled an off-request (see [`verify_fragment_options`]).
 ///
 /// Merge order is important: `confidential.config` deliberately re-enables
 /// options the `hardening.config` fragment turned off (e.g.
@@ -134,20 +134,25 @@ pub fn run_configure_phase(
 /// request (e.g. c8s.config disables hardening.config's RANDSTRUCT_FULL,
 /// which DEBUG_INFO_BTF is incompatible with) — and vice versa.
 fn verify_fragment_options(fragments: &[&Path], resolved: &Path) -> Result<()> {
+    /// Final request for a symbol after last-fragment-wins merging; On/Off
+    /// carry the requesting fragment's name for the error message.
+    enum Request {
+        /// `=y` (or `=m`: mod2yesconfig collapses it in this module-less
+        /// build) — must resolve `=y`.
+        On(String),
+        /// `# is not set` — must resolve off (not-set comment or absent).
+        Off(String),
+        /// Non-boolean value; not verified.
+        Skip,
+    }
     let config = fs_err::read_to_string(resolved)?;
-    // symbol -> full `CONFIG_X=...` line from the resolved .config.
-    let resolved_set: std::collections::HashMap<&str, &str> = config
+    // symbol -> value from the resolved .config's `CONFIG_X=value` lines.
+    let resolved_values: std::collections::HashMap<&str, &str> = config
         .lines()
         .filter(|l| l.starts_with("CONFIG_"))
-        .filter_map(|l| l.split_once('=').map(|(symbol, _)| (symbol, l)))
+        .filter_map(|l| l.split_once('='))
         .collect();
-    // symbol -> final request across fragments (last fragment wins):
-    //   Some((fragment, true))  — must resolve `=y` (`=m` collapses via
-    //                             mod2yesconfig in this module-less build)
-    //   Some((fragment, false)) — must resolve off (`# is not set`/absent)
-    //   None                    — non-boolean value; not verified
-    let mut requested: std::collections::BTreeMap<String, Option<(String, bool)>> =
-        Default::default();
+    let mut requested: std::collections::BTreeMap<String, Request> = Default::default();
     for frag in fragments {
         let name = frag.file_name().unwrap_or_default().to_string_lossy();
         for line in fs_err::read_to_string(frag)?.lines() {
@@ -158,31 +163,33 @@ fn verify_fragment_options(fragments: &[&Path], resolved: &Path) -> Result<()> {
                 .split_once('=')
                 .filter(|_| token.starts_with("CONFIG_"))
             {
-                let request = matches!(value, "y" | "m").then(|| (name.to_string(), true));
+                let request = match value {
+                    "y" | "m" => Request::On(name.to_string()),
+                    _ => Request::Skip,
+                };
                 requested.insert(symbol.to_string(), request);
             } else if let Some(symbol) = line
                 .strip_prefix("# ")
                 .and_then(|r| r.strip_suffix(" is not set"))
                 .filter(|s| s.starts_with("CONFIG_"))
             {
-                requested.insert(symbol.to_string(), Some((name.to_string(), false)));
+                requested.insert(symbol.to_string(), Request::Off(name.to_string()));
             }
         }
     }
-    let missing: Vec<String> = requested
-        .iter()
-        .filter_map(|(symbol, req)| req.as_ref().map(|(name, want_on)| (symbol, name, want_on)))
-        .filter_map(|(symbol, name, want_on)| {
-            let line = resolved_set.get(symbol.as_str()).copied();
-            match (want_on, line) {
-                (true, Some(l)) if l == format!("{symbol}=y") => None,
-                (true, _) => Some(format!("  - {name}: {symbol} requested on, dropped")),
-                (false, Some(l)) => Some(format!("  - {name}: {symbol} requested off, got {l}")),
-                (false, None) => None,
+    let mut mismatches = Vec::new();
+    for (symbol, request) in &requested {
+        match (request, resolved_values.get(symbol.as_str())) {
+            (Request::Skip, _) | (Request::On(_), Some(&"y")) | (Request::Off(_), None) => {}
+            (Request::On(name), _) => {
+                mismatches.push(format!("  - {name}: {symbol} requested on, dropped"));
             }
-        })
-        .collect();
-    if missing.is_empty() {
+            (Request::Off(name), Some(v)) => {
+                mismatches.push(format!("  - {name}: {symbol} requested off, got {symbol}={v}"));
+            }
+        }
+    }
+    if mismatches.is_empty() {
         Ok(())
     } else {
         Err(anyhow!(
@@ -191,7 +198,7 @@ fn verify_fragment_options(fragments: &[&Path], resolved: &Path) -> Result<()> {
              force-enables `is not set` requests for selected/promptless symbols):\n{}\n\
              Fix the fragment (add the missing dependency, or unset the selecting \
              symbol / document the force-enable) and rebuild.",
-            missing.join("\n")
+            mismatches.join("\n")
         ))
     }
 }
