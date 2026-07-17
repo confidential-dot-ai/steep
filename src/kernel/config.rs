@@ -140,7 +140,8 @@ fn verify_fragment_options(fragments: &[&Path], resolved: &Path) -> Result<()> {
         /// `=y` (or `=m`: mod2yesconfig collapses it in this module-less
         /// build); must resolve `=y`.
         On(String),
-        /// `# is not set`; must resolve off (not-set comment or absent).
+        /// `# is not set` or `=n`; must resolve off (not-set comment or
+        /// absent).
         Off(String),
         /// Non-boolean value; not verified.
         Skip,
@@ -165,6 +166,8 @@ fn verify_fragment_options(fragments: &[&Path], resolved: &Path) -> Result<()> {
             {
                 let request = match value {
                     "y" | "m" => Request::On(name.to_string()),
+                    // kconfig treats `=n` exactly like `# is not set`.
+                    "n" => Request::Off(name.to_string()),
                     _ => Request::Skip,
                 };
                 requested.insert(symbol.to_string(), request);
@@ -318,6 +321,19 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("hardening.config: CONFIG_SERIO_I8042 requested off"));
+    }
+
+    #[test]
+    fn verify_fragment_options_treats_eq_n_as_off_request() {
+        let d = TempDir::new().unwrap();
+        let frag = write(&d, "frag.config", "CONFIG_A=n\n");
+        let forced = write(&d, "resolved", "CONFIG_A=y\n");
+        let err = verify_fragment_options(&[frag.as_path()], &forced)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("frag.config: CONFIG_A requested off"));
+        let off = write(&d, "resolved2", "CONFIG_B=y\n");
+        verify_fragment_options(&[frag.as_path()], &off).unwrap();
     }
 
     #[test]
