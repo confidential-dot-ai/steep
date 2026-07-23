@@ -98,7 +98,10 @@ jobs:
         # Host deps for `confos build` — keep in lockstep with bin/setup.
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y systemd-container ovmf cpio acpica-tools
+          # ovmf-inteltdx ships /usr/share/ovmf/OVMF.inteltdx.fd, the unified
+          # -bios-bootable TDX firmware confos measures (base `ovmf` only has
+          # the non-TDX OVMF.fd). #82.
+          sudo apt-get install -y systemd-container ovmf ovmf-inteltdx cpio acpica-tools
 
       - name: Cache kernel tools
         uses: actions/cache@v5
