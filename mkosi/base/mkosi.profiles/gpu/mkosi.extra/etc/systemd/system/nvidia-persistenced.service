@@ -1,0 +1,34 @@
+[Unit]
+Description=NVIDIA Persistence Daemon
+# Modules are loaded by systemd-modules-load.service (see
+# /etc/modules-load.d/nvidia.conf). The daemon performs the FIRST driver
+# attach and HOLDS it for the life of the VM — load-bearing in CC mode, where
+# the GPU forbids re-establishing the SPDM session after teardown without a
+# fresh FLR. It must attach only AFTER nvidia-gpu-flr resets the GPU (the CC
+# SPDM precondition — see /usr/local/bin/nvidia-gpu-flr).
+After=systemd-modules-load.service nvidia-gpu-flr.service
+# Wants (not Requires) for the FLR unit deliberately: Requires= propagates
+# stops, so an operator re-running the oneshot at runtime would take
+# persistenced down with it — destroying every held CC session (unrecoverable
+# without another FLR). If nvidia-gpu-flr genuinely failed on a GPU boot the
+# attach would fail loudly anyway (RmInitAdapter 0x22).
+Wants=nvidia-gpu-flr.service syslog.target
+
+[Service]
+Type=forking
+# Skip (not fail) on a GPU-less boot — keeps the image degraded-nothing when
+# booted without a GPU attached.
+ExecCondition=/bin/sh -c 'grep -qx 0x10de /sys/bus/pci/devices/*/vendor 2>/dev/null'
+# --uvm-persistence-mode was the load-bearing flag on b200-dev-1 (checkpoint
+# 006): it keeps nvidia_uvm resident. persistenced creates the /dev/nvidia*
+# nodes via the setuid nvidia-modprobe we stage. Tolerate a GPU-less boot —
+# the daemon simply finds no devices.
+ExecStart=/usr/bin/nvidia-persistenced --uvm-persistence-mode --verbose
+ExecStopPost=-/bin/rm -rf /var/run/nvidia-persistenced
+
+# vsock fence: only attestation-api may use AF_VSOCK (see kernel/gpu.config).
+RestrictAddressFamilies=AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
+
