@@ -1,0 +1,25 @@
+[Unit]
+Description=Create the NVIDIA IMEX channel device node
+# B200/NVSwitch GPUs need an IMEX (Internode Memory Exchange) channel to
+# initialize the multi-GPU fabric — without /dev/nvidia-caps-imex-channels/channel0
+# CUDA fails with "error 802: system not yet initialized" (cudaGetDeviceCount),
+# even for single-node multi-GPU. On bare metal nvidia-imex/fabric-manager
+# creates it; in the CVM we create channel 0 explicitly. Must run after the
+# driver is attached and BEFORE nvidia-cdi-generate so the CDI spec can pick it
+# up (and before kubelet so GPU pods see it).
+After=nvidia-persistenced.service
+Wants=nvidia-persistenced.service
+Before=nvidia-cdi-generate.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Skip on a GPU-less boot — same degraded-nothing posture as the other nvidia units.
+ExecCondition=/bin/sh -c 'grep -qx 0x10de /sys/bus/pci/devices/*/vendor 2>/dev/null'
+# Logic lives in a script, not inline: systemd's unit parser mangles a multi-line
+# ExecStart with $()/backslash-continuations ("Ignoring unknown escape sequences"),
+# which silently skips the mknod and leaves CUDA at error 802.
+ExecStart=/bin/sh /usr/local/bin/nvidia-imex-channel.sh
+
+[Install]
+WantedBy=multi-user.target
