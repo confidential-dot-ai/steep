@@ -63,7 +63,7 @@ jobs:
     timeout-minutes: 180
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.3.1
 
       - name: Set image ref and variant
         # Dev variant when pushing to the dev branch OR when dispatched with
@@ -86,13 +86,13 @@ jobs:
           df -h
 
       - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
 
       - name: Setup mkosi
-        uses: systemd/mkosi@v26
+        uses: systemd/mkosi@84af20892b61c8e177e391f997ded8b4cb5514f2 # v26
 
       - name: Install build deps (nspawn, TDVF firmware, iasl, cpio)
         # Host deps for `confos build` — keep in lockstep with bin/setup.
@@ -104,7 +104,7 @@ jobs:
           sudo apt-get install -y systemd-container ovmf cpio acpica-tools
 
       - name: Cache kernel tools
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: mkosi/kernel-builder/mkosi.tools
           key: ${{ runner.os }}-tools-${{ hashFiles('mkosi/kernel-builder/mkosi.conf') }}
@@ -117,7 +117,7 @@ jobs:
       # the already-taken key. (hashFiles has no brace expansion; list files
       # individually.)
       - name: Cache kernel
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: output/kernel
           key: ${{ runner.os }}-kernel-${{ env.VARIANT }}-${{ hashFiles('mkosi/kernel-builder/mkosi.conf','kernel/c8s.config','kernel/c8s-dev.config','kernel/required.config','kernel/hardening.config','kernel/confidential.config','kernel/config-x86_64.snapshot','kernel/version','bin/build-c8s') }}
@@ -126,7 +126,7 @@ jobs:
       # ToolsTreePackages (oras, jq, curl), so the tree differs from the
       # base build's under what would otherwise be the same key.
       - name: Cache base image tools
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             mkosi/base/mkosi.tools
@@ -139,7 +139,7 @@ jobs:
       # any sync edit a partial re-download instead of a full one (stale
       # entries are sha-verified, so restoring an old cache is safe).
       - name: Cache c8s artifact downloads
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: mkosi/base/mkosi.pkgcache/c8s
           key: ${{ runner.os }}-c8s-artifacts-${{ hashFiles('mkosi/base/mkosi.profiles/c8s/mkosi.sync') }}
@@ -150,7 +150,7 @@ jobs:
       # output/gpu/cache and sha-verifies on reuse — keyed on the script,
       # which carries the version + sha pins.
       - name: Cache NVIDIA driver downloads
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: output/gpu/cache
           key: ${{ runner.os }}-gpu-artifacts-${{ hashFiles('bin/steep-fetch-gpu') }}
@@ -202,7 +202,10 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: confidential-dot-ai/attestation-rs
-          ref: main
+          # Commit-pinned: this binary lands inside the measured image, so
+          # its source must not float with attestation-rs main. Bump
+          # deliberately alongside the attest profile's digest pins.
+          ref: 67ee36f86f1618973ddf1dcc5a44cf974acce4f9
           path: attestation-rs
           token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -236,29 +239,40 @@ jobs:
         # the output dir and the push/roothash paths below stay aligned.
         run: C8S_NAME="$VARIANT" bin/build-c8s
 
-      # Skip the multi-GB push when the rootfs is byte-identical to what's
-      # already published: the verity roothash is a content hash of the
-      # entire rootfs. The :c8s artifact stores roothash as its own titled
-      # layer, so the published value is a few-KB blob fetch. Best-effort —
-      # any miss falls through to publishing.
-      - name: Check whether the rootfs changed
+      # Skip the multi-GB push when the full publishable set is byte-identical
+      # to what's already published. `confos push` uploads every output file as
+      # its own titled, uncompressed layer, so a layer digest is the sha256 of
+      # the file — compare each local file against the published :VARIANT
+      # manifest. The roothash alone is NOT a sufficient gate: kernel, initrd,
+      # cmdline, and OVMF changes leave the rootfs (and thus the roothash)
+      # identical while changing uki.efi and the measurements. manifest.json is
+      # excluded — it embeds a build timestamp, so it differs on every run.
+      # Best-effort — any miss falls through to publishing.
+      - name: Check whether the artifacts changed
         id: changed
         run: |
           set -uo pipefail
-          new=$(cat "output/${VARIANT}/roothash" 2>/dev/null || echo new)
-          digest=$(oras manifest fetch "${IMAGE}:${VARIANT}" 2>/dev/null \
-                     | jq -r '.layers[] | select(.annotations["org.opencontainers.image.title"] == "roothash") | .digest' \
+          layers=$(oras manifest fetch "${IMAGE}:${VARIANT}" 2>/dev/null \
+                     | jq -r '.layers[] | (.annotations["org.opencontainers.image.title"] // empty) + " " + .digest' \
                      || true)
-          pub=none
-          if [ -n "$digest" ]; then
-            pub=$(oras blob fetch --output - "${IMAGE}@${digest}" 2>/dev/null || echo none)
-          fi
-          echo "new=$new published=$pub"
-          if [ "$new" = "$pub" ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "rootfs roothash unchanged ($new) — skipping publish."
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
+          skip=true
+          [ -n "$layers" ] || skip=false
+          for f in "output/${VARIANT}"/*; do
+            [ -f "$f" ] && [ ! -L "$f" ] || continue
+            name=$(basename "$f")
+            [ "$name" = "manifest.json" ] && continue
+            pub=$(printf '%s\n' "$layers" | awk -v n="$name" '$1 == n {print $2}')
+            new="sha256:$(sha256sum "$f" | cut -d' ' -f1)"
+            if [ "$new" = "$pub" ]; then
+              echo "$name unchanged ($new)"
+            else
+              echo "$name changed: local $new published ${pub:-<absent>}"
+              skip=false
+            fi
+          done
+          echo "skip=$skip" >> "$GITHUB_OUTPUT"
+          if [ "$skip" = "true" ]; then
+            echo "all publishable artifacts unchanged — skipping publish."
           fi
 
       - name: Push to GHCR
