@@ -13,7 +13,7 @@ sudo apt-get update
 # ovmf provides OVMF.inteltdx.fd (the unified TDX firmware confos hashes +
 # the guest -bios-boots) for TDX builds. NOT OVMF.fd (pflash-style, hangs).
 # measurements. Keep host deps in lockstep with .github/workflows/base.yml.
-sudo apt install -y build-essential systemd-repart systemd-container qemu-utils genisoimage swtpm cpio acpica-tools ovmf
+sudo apt install -y build-essential systemd-repart systemd-container qemu-utils genisoimage swtpm cpio acpica-tools ovmf ovmf-inteltdx
 
 echo "==> Installing uv..."
 which uv || curl -LsSf https://astral.sh/uv/install.sh | sh
