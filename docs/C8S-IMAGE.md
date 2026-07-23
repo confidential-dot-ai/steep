@@ -47,7 +47,9 @@ CI's mode until the attestation-rs `-gpu` image digest is pinned),
 | attestation-api | **attest-gpu profile** (or `attest` under `C8S_STOCK_ATTEST=1`), not this one | host service on `0.0.0.0:8400` |
 | NVIDIA driver stack | **gpu profile** | see docs/GPU-IMAGE-PLAN.md |
 
-Airgap bundles are baked deliberately: the measurement covers the exact
+"Airgap" bundles are RKE2's pre-seeded image tarballs: anything in
+`agent/images/` gets loaded into containerd at startup instead of pulled.
+Baking them is deliberate: the measurement covers the exact
 bytes of every control-plane image (kube-* static pods, Cilium, CoreDNS)
 and first boot needs no registry egress for them. Exception: the baked
 local-path-storage manifest's images (local-path-provisioner + busybox
