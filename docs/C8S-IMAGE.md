@@ -240,7 +240,8 @@ Two failure modes hard-won here (both fixed; noted so they stay fixed):
   rke2-server restart; CDS-fed allowlist enforced (allowed digest admits,
   unlisted denies); ratls-mesh/tee-proxy functional; chart attestation-api
   coexists with baked :8400.
-- **S5 CI + publish**: c8s.yml green; a no-change rerun hits the
+- **S5 CI + publish**: c8s CI's `c8s-image.yml` green (it checks out this
+  tree at a pinned ref and runs `bin/build-c8s`); a no-change rerun hits the
   roothash publish-skip; pulled artifact re-verifies.
 
 ## GPU pods
